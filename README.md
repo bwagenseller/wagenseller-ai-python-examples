@@ -53,18 +53,32 @@ The library is `pip`-installable. An **editable install** lets the `scripts/`
 import `amadeo_utils` from anywhere with no `PYTHONPATH` juggling:
 
 ```bash
-# core library only
+# core library only (client/server framework + file encryption)
 pip install -e .
 
-# with the heavy local-AI stack (torch, whisperx, llama-cpp-python, f5-tts, kokoro, ...)
-pip install -e ".[ml]"
-
-# browser-automation extra (for the Infinite Campus tool)
-pip install -e ".[automation]"
+# one extra per component — each in its OWN environment (their pins conflict):
+pip install -e ".[asr]"         # WhisperX speech-to-text
+pip install -e ".[llm]"         # llama.cpp chat / streaming / vector-DB
+pip install -e ".[tts-f5]"      # F5-TTS  (Python 3.12 only)
+pip install -e ".[tts-kokoro]"  # Kokoro TTS
+pip install -e ".[client]"      # mic + playback client / conversational-ai orchestrator
+pip install -e ".[media]"       # audio extraction / recording / noise reduction
+pip install -e ".[infinite-campus]"  # Playwright (Infinite Campus tool)
 ```
 
-> The `[ml]` extras are large and hardware-specific (CUDA builds of `torch`,
-> `llama-cpp-python`, etc.). Install them in an environment matched to your GPU.
+> **Each extra mirrors a dedicated environment and is meant to be installed alone.**
+> Their `numpy`/`torch` pins intentionally differ (e.g. `[tts-f5]` needs numpy 1.x while
+> `[asr]` needs numpy 2.3) and will not co-resolve in a single environment. The heavy
+> extras (`asr`, `llm`, `tts-f5`, `tts-kokoro`) pull in CUDA builds of `torch` /
+> `llama-cpp-python` — install them on a machine matched to your GPU. For a specific CUDA
+> build, add the PyTorch index, e.g. `--index-url https://download.pytorch.org/whl/cu128`.
+> Tested on Python 3.12, except `[llm]` and `[infinite-campus]` (Python 3.13); `[tts-f5]` is 3.12-only.
+
+**System dependency — `ffmpeg`.** The `[asr]` (WhisperX) and `[media]` components shell out to
+`ffmpeg` for audio decoding/extraction, and it is **not** a pip package. Install it via your OS
+package manager before using those extras, e.g. `sudo apt install ffmpeg` (Debian/Ubuntu),
+`brew install ffmpeg` (macOS), or `conda install -c conda-forge ffmpeg`. The Playwright
+(`[infinite-campus]`) extra also needs its browser binaries: `playwright install` after `pip install`.
 
 ## The library — `src/amadeo_utils/`
 
@@ -80,7 +94,7 @@ pip install -e ".[automation]"
 | `misc_utils/` | `FileEncryption` — authenticated file encryption (Argon2id + Fernet/AES) |
 | `colored_text.py` | terminal color helper |
 
-## The examples — `scripts/`
+## The scripts — `scripts/`
 
 - **`ai/combos/conversational_ai/`** — the full voice pipeline (server + client). ⭐ start here
 - **`ai/asr/whisperx/streaming/`** — streaming transcription client/server

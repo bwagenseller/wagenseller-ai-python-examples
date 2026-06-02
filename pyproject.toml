@@ -6,36 +6,67 @@ build-backend = "setuptools.build_meta"
 name = "amadeo-utils"
 version = "0.1.0"
 description = "A homegrown Python toolkit: AI voice pipelines (ASR/LLM/TTS), a client/server framework, and media + crypto utilities."
-requires-python = ">=3.10"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
-    "numpy",
-    "pandas",
-    "scipy",
-    "scikit-learn",
-    "cryptography>=44",
-    "python-dotenv",
-    "sounddevice",
-    "soundfile",
-    "pygame",
-    "pynput",
-    "webrtcvad",
+    "cryptography>=46",
 ]
 
+# NOTE: each extra mirrors a dedicated conda env. numpy/torch versions
+# intentionally DIFFER across extras and are NOT mutually compatible
+# (e.g. tts-f5 needs numpy 1.x, asr needs numpy 2.3). Install only the
+# extra(s) for the component you're running, each in its own environment.
 [project.optional-dependencies]
-ml = [
-    "torch",
-    "transformers",
-    "whisperx",
-    "llama-cpp-python",
-    "f5-tts",
-    "kokoro",
-    "librosa",
-    "noisereduce",
-    "peft",
-    "trl",
-    "datasets",
+asr = [
+    "numpy==2.3.1",
+    "sounddevice==0.5.2",
+    "torch==2.7.1",
+    "whisperx==3.4.2",
+    "webrtcvad-wheels==2.0.14",
 ]
-automation = ["playwright"]
+llm = [
+    "llama-cpp-python==0.3.9",
+    "numpy==2.3.1",
+    "pandas==2.2.3",
+]
+tts-f5 = [
+    "f5-tts==1.1.7",
+    "numpy==1.26.4",
+    "soundfile==0.13.1",
+    "torch==2.8.0",
+]
+tts-kokoro = [
+    "kokoro==0.9.4",
+    "numpy==2.2.6",
+    "soundfile==0.13.1",
+    "torch==2.8.0",
+]
+client = [
+    "numpy==2.2.6",
+    "pygame==2.6.1",
+    "playsound==1.3.0",
+    "scikit-learn==1.7.1",
+    "sounddevice==0.5.2",
+    "webrtcvad-wheels==2.0.14",
+]
+media = [
+    "librosa==0.11.0",
+    "noisereduce==3.0.3",
+    "numpy==2.2.6",
+    "pynput==1.8.1",
+    "scipy==1.16.1",
+    "sounddevice==0.5.2",
+    "soundfile==0.13.1",
+]
+infinite-campus = [
+    "playwright==1.58.0",
+    "python-dotenv==1.2.2",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
