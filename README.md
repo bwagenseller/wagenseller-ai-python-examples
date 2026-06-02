@@ -1,4 +1,4 @@
-# amadeo-utils
+# Wagenseller AI — Python Examples
 
 A homegrown Python toolkit built around **local, self-hosted AI** — speech-to-text,
 local LLMs, and text-to-speech — plus the client/server, media, and crypto plumbing
