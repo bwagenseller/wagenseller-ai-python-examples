@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amadeo-utils"
+version = "0.1.0"
+description = "A homegrown Python toolkit: AI voice pipelines (ASR/LLM/TTS), a client/server framework, and media + crypto utilities."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "cryptography>=44",
+    "python-dotenv",
+    "sounddevice",
+    "soundfile",
+    "pygame",
+    "pynput",
+    "webrtcvad",
+]
+
+[project.optional-dependencies]
+ml = [
+    "torch",
+    "transformers",
+    "whisperx",
+    "llama-cpp-python",
+    "f5-tts",
+    "kokoro",
+    "librosa",
+    "noisereduce",
+    "peft",
+    "trl",
+    "datasets",
+]
+automation = ["playwright"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE / tooling
+.idea/
+.claude/
+
+# Backups / leftovers
+*.ORIG
+*.orig
+*.bak
+
+# Private / local config (never share)
+src/amadeo_utils/ai/llm/llama/subjective_constants_local.py
+examples/ai/llm/llama/llama_local_vector_db/my_base_json_config.json
+.env
+
+# Generated audio output
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.opus
+*.pcm

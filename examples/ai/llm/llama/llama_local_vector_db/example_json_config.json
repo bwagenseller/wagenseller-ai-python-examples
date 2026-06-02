@@ -1,0 +1,26 @@
+{
+    "base_model_dir": "/home/kevin/ai/models/llama.cpp",
+    "base_embedding_dir": "/home/kevin/ai/models/llama.cpp/embedding_models",
+    "model": "llama-3-70b.Q4_K_M.gguf",
+    "embedding_model": "nomic-embed-text-v1.5.Q5_K_M.gguf",
+
+    "player_name": "Kevin",
+    "base_convo_dir": "/home/kevin/ai/chat_history",
+    "convo_name": "my_chat",
+    "override_base_convo_dir": true,
+    "system_prompt_file": "/home/kevin/ai/system_prompt.txt",
+
+    "gpu_layers": 57,
+    "embedding_gpu_layers": -1,
+    "max_context_tokens": 4096,
+    "embedding_max_context_tokens": 512,
+    "max_response_tokens": 512,
+
+    "max_vector_database_pcnt": 0.2,
+    "buffer_context_pcnt": 0.05,
+
+    "top_k": 4,
+    "min_vector_db_score": 0.6,
+
+    "debug": false
+} 
