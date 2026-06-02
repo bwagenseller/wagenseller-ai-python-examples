@@ -10,12 +10,12 @@ threaded socket server.
 
 ```
 amadeo_utils/   ← the reusable library (installable package)
-examples/       ← runnable scripts that drive the library
+scripts/        ← runnable scripts that drive the library
 ```
 
 ## Highlight: a full voice-conversation pipeline
 
-The flagship example (`examples/ai/combos/conversational_ai/`) is an end-to-end,
+The flagship example (`scripts/ai/combos/conversational_ai/`) is an end-to-end,
 real-time **voice → voice** loop:
 
 ```
@@ -49,7 +49,7 @@ Notable engineering details:
 
 ## Install
 
-The library is `pip`-installable. An **editable install** lets the `examples/`
+The library is `pip`-installable. An **editable install** lets the `scripts/`
 import `amadeo_utils` from anywhere with no `PYTHONPATH` juggling:
 
 ```bash
@@ -80,7 +80,7 @@ pip install -e ".[automation]"
 | `misc_utils/` | `FileEncryption` — authenticated file encryption (Argon2id + Fernet/AES) |
 | `colored_text.py` | terminal color helper |
 
-## The examples — `examples/`
+## The examples — `scripts/`
 
 - **`ai/combos/conversational_ai/`** — the full voice pipeline (server + client). ⭐ start here
 - **`ai/asr/whisperx/streaming/`** — streaming transcription client/server

@@ -7,6 +7,10 @@ __pycache__/
 .idea/
 .claude/
 
+# Personal / assistant notes (not for public repo)
+BRENT.md
+CLAUDE.md
+
 # Backups / leftovers
 *.ORIG
 *.orig
@@ -14,7 +18,7 @@ __pycache__/
 
 # Private / local config (never share)
 src/amadeo_utils/ai/llm/llama/subjective_constants_local.py
-examples/ai/llm/llama/llama_local_vector_db/my_base_json_config.json
+scripts/ai/llm/llama/llama_local_vector_db/my_base_json_config.json
 .env
 
 # Generated audio output
