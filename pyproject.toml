@@ -62,6 +62,7 @@ media = [
     "scipy==1.16.1",
     "sounddevice==0.5.2",
     "soundfile==0.13.1",
+    "webrtcvad-wheels==2.0.14",
 ]
 infinite-campus = [
     "playwright==1.58.0",

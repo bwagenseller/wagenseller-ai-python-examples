@@ -80,6 +80,11 @@ package manager before using those extras, e.g. `sudo apt install ffmpeg` (Debia
 `brew install ffmpeg` (macOS), or `conda install -c conda-forge ffmpeg`. The Playwright
 (`[infinite-campus]`) extra also needs its browser binaries: `playwright install` after `pip install`.
 
+**System dependency — `pulseaudio-utils`.** The live audio-capture component of `[media]`
+(`media_utils/audio_capture.py` and the `scripts/media/capture_*.py` scripts) shells out to
+`pactl`/`parec`, so it is Linux-only (PulseAudio, or PipeWire via `pipewire-pulse`):
+`sudo apt install pulseaudio-utils` (Debian/Ubuntu).
+
 ## The library — `src/amadeo_utils/`
 
 | Module | What it does |
@@ -90,7 +95,7 @@ package manager before using those extras, e.g. `sudo apt install ffmpeg` (Debia
 | `ai/tts/` | F5-TTS and Kokoro text-to-speech, with a custom voice library |
 | `ai/combined/` | the conversational pipeline that orchestrates ASR + LLM + TTS |
 | `client/`, `server/` | the threaded socket framework (length-prefixed JSON protocol) |
-| `media_utils/` | audio manipulation helpers |
+| `media_utils/` | audio manipulation helpers + live capture of speakers/mic (with timer, VAD-silence, and programmatic stop conditions) |
 | `misc_utils/` | `FileEncryption` — authenticated file encryption (Argon2id + Fernet/AES) |
 | `colored_text.py` | terminal color helper |
 
@@ -102,7 +107,8 @@ package manager before using those extras, e.g. `sudo apt install ffmpeg` (Debia
 - **`ai/llm/llama/llama_local_vector_db/`** — role-play chat with vector-DB long-term memory
 - **`ai/llm/llama/local_knowledge_base/`** — retrieval-augmented Q&A over a local knowledge base
 - **`ai/tts/`** — F5 and Kokoro TTS servers, a voice-blending demo, and a simple client
-- **`media/`** — audio extraction, recording, and noise reduction utilities
+- **`media/`** — audio extraction, recording, and noise reduction utilities, plus
+  live speaker-loopback / mic capture (`capture_audio.py`)
 - **`tools/infinite_campus/`** — Playwright-driven SSO scraper that emails a school-grades
   report (credentials are read from environment variables; see `.env.example`)
 - **`utils/`** — a CLI wrapper around the file-encryption module
