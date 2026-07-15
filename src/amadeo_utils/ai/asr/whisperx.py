@@ -7,7 +7,8 @@ import whisperx
 import numpy as np
 import argparse
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
+from whisperx.audio import N_SAMPLES, log_mel_spectrogram
 from amadeo_utils.colored_text import ColoredText
 from amadeo_utils.server.amadeo_server import AmadeoServer
 
@@ -19,6 +20,53 @@ with 'get_transcription'.
 # Configure logging to show timestamps and log levels
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def detect_language_with_probability(asr_model, audio: np.ndarray) -> Tuple[str, float]:
+    """
+    Detect the spoken language of an audio segment AND return the confidence score.
+
+    whisperx's own FasterWhisperPipeline.detect_language() computes the language
+    probability internally and then throws it away, returning only the language
+    code. We want the confidence too, so this repeats the same steps and returns
+    both.
+
+    This previously existed as a method hand-added to whisperx/asr.py inside
+    site-packages. That patch was invisible to this repo and did not survive
+    rebuilding the conda env, so it is implemented here instead.
+
+    :param asr_model: A loaded whisperx pipeline, i.e. the result of
+                      whisperx.load_model().
+    :param audio: Mono float32 audio at 16 kHz. Only the first 30 seconds
+                  (N_SAMPLES) are used, as Whisper's language detection is
+                  trained on 30s windows; shorter audio is zero-padded.
+    :return: Tuple of (language_code, probability) - e.g. ('en', 0.98).
+    """
+    # asr_model.model is the faster-whisper WhisperModel wrapper; its own .model
+    # attribute is the underlying CTranslate2 model, which is what actually
+    # exposes detect_language().
+    whisper_model = asr_model.model
+
+    # Larger Whisper variants use 128 mel bins rather than the classic 80, so ask
+    # the model rather than assuming.
+    n_mels = whisper_model.feat_kwargs.get("feature_size")
+
+    segment = log_mel_spectrogram(
+        audio[:N_SAMPLES],
+        n_mels=n_mels if n_mels is not None else 80,
+        padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0],
+    )
+
+    encoder_output = whisper_model.encode(segment)
+    results = whisper_model.model.detect_language(encoder_output)
+
+    # results[0][0] is a (language_token, probability) pair for the most likely
+    # language. The token is delimited like '<|en|>', so strip the two leading and
+    # two trailing characters to recover the bare language code.
+    language_token, language_probability = results[0][0]
+
+    return language_token[2:-2], language_probability
+
 
 class AmadeoWhisperX:
 
@@ -40,6 +88,17 @@ class AmadeoWhisperX:
 
         # set this lock, which will 'lock' the GPU for its own purposes (really, it locks the methods that WhisperX uses to interact with the GPU)
         self.gpu_lock = threading.Lock()
+
+        # WhisperX's VAD is pyannote, which disables TensorFloat-32 for
+        # reproducibility on every CUDA inference and warns loudly each time it
+        # finds TF32 still enabled (torch defaults cudnn.allow_tf32 to True).
+        # Setting the same state up front leaves behaviour identical - pyannote
+        # would force it anyway - while keeping the logs clean. Do not re-enable
+        # TF32 to chase speed: pyannote re-disables it per inference, and the
+        # actual Whisper transcription runs through CTranslate2, which ignores
+        # these torch flags entirely.
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
 
         # --- WhisperX Setup ---
         logger.info(f"{ColoredText.BLUE_TEXT}WhisperXServer: Loading WhisperX model '{self.args_dict['model']}' on {self.device} with {self.compute_type}...{ColoredText.END_TEXT}")
@@ -133,7 +192,7 @@ class AmadeoWhisperX:
 
                     audio_for_lang_detect = whisperx.audio.pad_or_trim(audio_segment_np)
 
-                    detected_language, language_confidence = self.asr_model.detect_language_with_probability(audio_for_lang_detect)
+                    detected_language, language_confidence = detect_language_with_probability(self.asr_model, audio_for_lang_detect)
 
                     result = self.asr_model.transcribe(audio_segment_np, batch_size=1, language=detected_language)
 

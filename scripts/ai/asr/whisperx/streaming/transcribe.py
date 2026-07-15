@@ -18,6 +18,8 @@ import webrtcvad         # WebRTC Voice Activity Detector; a highly efficient li
                          # speech from non-speech (silence, noise) in audio.
 from datetime import datetime
 
+from amadeo_utils.ai.asr.whisperx import detect_language_with_probability
+
 """
 I got this from Google Gemini.
 
@@ -115,6 +117,16 @@ stop_event = threading.Event()
 # --- WhisperX Model Loading ---
 # Models are loaded only once at the beginning of the script to minimize overhead
 # and avoid repeated loading during continuous real-time processing.
+
+# WhisperX's VAD is pyannote, which disables TensorFloat-32 for reproducibility on
+# every CUDA inference and warns loudly each time it finds TF32 still enabled
+# (torch defaults cudnn.allow_tf32 to True). Setting the same state up front leaves
+# behaviour identical - pyannote would force it anyway - while keeping the output
+# clean. Do not re-enable TF32 to chase speed: pyannote re-disables it per
+# inference, and the actual Whisper transcription runs through CTranslate2, which
+# ignores these torch flags entirely.
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
 
 print(f"Loading WhisperX model '{WHISPER_MODEL_NAME}' on {DEVICE} with {COMPUTE_TYPE}...")
 # `whisperx.load_model()` loads the main ASR model (e.g., "base.en").
@@ -293,13 +305,15 @@ def transcribe_audio_thread():
             # Convert to appropriate format for detect_language
             audio_for_language_detection = whisperx.audio.pad_or_trim(audio_segment.astype(np.float32))
 
-            # It seems for whisper, the detect_language method returns the detected language and a dictionary of probabilities for all detected languages, with the first element is the most probable language code string.
-            # The second element is a dictionary mapping language codes to their probabilities.
-            # Unfortunately, whisperx does not do this - but you CAN go into the backend python method 'detect_language', remove the annoying print line, and have it expressly return language_probability (you will note it did not before, and it should have).
-            # I didnt modify it directly, but I made a new one (in case other calling things would call this and expect just the language to be returned) in <CONDA_ENV>/lib/python3.12/site-packages/whisperx/asr.py; I named it 'detect_language_with_probability',
-            # where the official one is simply 'detect_language' (so if you are copying this, you will have to either make 'detect_language_with_probability' or just use 'detect_language' with no probability returned).
-            #detected_language = asr_model.detect_language(audio_for_language_detection)
-            detected_language, language_probability = asr_model.detect_language_with_probability(audio_for_language_detection)
+            # whisperx's own asr_model.detect_language() computes the language
+            # probability internally but returns ONLY the language code, discarding
+            # the confidence we want. detect_language_with_probability() repeats the
+            # same steps and returns both.
+            #
+            # This used to be a method hand-patched into whisperx/asr.py inside
+            # site-packages. That patch was invisible to this repo and vanished the
+            # moment the conda env was rebuilt, so it now lives in amadeo_utils.
+            detected_language, language_probability = detect_language_with_probability(asr_model, audio_for_language_detection)
 
 
             # Now perform the transcription, explicitly passing the detected language.

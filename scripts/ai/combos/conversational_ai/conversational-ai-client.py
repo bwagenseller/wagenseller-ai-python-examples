@@ -10,10 +10,10 @@ import wave
 import io
 import pygame
 
-from sklearn.utils import deprecated
 
 from amadeo_utils.colored_text import ColoredText
 from amadeo_utils.client.amadeo_client import AmadeoClient
+from amadeo_utils.media_utils.audio_devices import prefer_pulse_defaults
 import logging
 import os
 import json
@@ -279,6 +279,10 @@ class ConversationalAiPipelineClient:
             # MAIN AUDIO CAPTURE LOOP
             # ============================================================================
 
+            # Route through PulseAudio where available: raw ALSA capture devices
+            # reject SAMPLE_RATE (16 kHz) outright rather than resampling.
+            prefer_pulse_defaults()
+
             # Open audio input stream with 16kHz sample rate (required by WhisperX)
             # int16 format provides 16-bit signed integer samples (-32768 to 32767)
             with sd.InputStream(samplerate=ConversationalAiPipelineClient.SAMPLE_RATE, channels=1, dtype='int16', blocksize=self.VAD_FRAME_SIZE) as stream:
@@ -435,113 +439,6 @@ class ConversationalAiPipelineClient:
                     )
 
                 self.graceful_shutdown()
-
-    @deprecated
-    def run_client_old(self):
-        """
-        This is the OLD run Client pre 2025-11-06 - it did NOT use silence as a boundary (or did not use it well); I had to hit the 'mute' button for this to trigger.
-        The current one, which does take into consideration silence, works better.
-
-        This should be deleted cby Christmas 2025 if this is still deprecated.
-
-        :return:
-        """
-        signal.signal(signal.SIGINT, lambda s, f: self.graceful_shutdown())
-
-        try:
-            logger.info(f"{ColoredText.BLUE_TEXT}Attempting to connect to server on host: {ColoredText.END_TEXT}{ColoredText.YELLOW_TEXT}{self.args_dict['host']}{ColoredText.END_TEXT}{ColoredText.BLUE_TEXT} port: {ColoredText.END_TEXT}{ColoredText.YELLOW_TEXT}{self.args_dict['port']}{ColoredText.END_TEXT}")
-
-            # Establish persistent connection
-            if not self.socket_client.establish_persistent_connection():
-                logger.error(f"{ColoredText.RED_TEXT}Failed to establish connection. Exiting.{ColoredText.END_TEXT}")
-                return
-
-            logger.info(f"{ColoredText.BLUE_TEXT}Starting microphone stream. Press Ctrl+C to exit.{ColoredText.END_TEXT}")
-
-            # Initialize VAD and audio processing variables
-            vad = webrtcvad.Vad(self.args_dict['vad_aggressiveness'])
-            current_audio_buffer = bytearray()
-            silent_frames_count = 0
-            silent_frames_threshold = int(self.args_dict['silence_duration'] / self.args_dict['vad_frame_duration'])
-            has_spoken = False
-
-
-            with sd.InputStream(samplerate=ConversationalAiPipelineClient.SAMPLE_RATE, channels=1, dtype='int16', blocksize=self.VAD_FRAME_SIZE) as stream:
-                while self.is_recording:
-                    audio_frame, _ = stream.read(self.VAD_FRAME_SIZE)
-                    int16_data = audio_frame.tobytes()
-
-                    is_speech = vad.is_speech(int16_data, ConversationalAiPipelineClient.SAMPLE_RATE)
-
-                    if is_speech:
-                        has_spoken = True
-                        silent_frames_count = 0
-                        current_audio_buffer.extend(int16_data)
-
-                    elif has_spoken:
-                        silent_frames_count += 1
-                        current_audio_buffer.extend(int16_data)
-
-                        if silent_frames_count >= silent_frames_threshold:
-                            speech_segment_bytes = current_audio_buffer[:-silent_frames_threshold * self.VAD_FRAME_SIZE * 2]
-
-                            if len(speech_segment_bytes) > 0:
-                                logger.debug(f"{ColoredText.BLUE_TEXT}End of speech detected. Sending audio chunk to server...{ColoredText.END_TEXT}")
-
-                                # Send using the new persistent request method with binary audio data
-                                logger.info(f"{ColoredText.BLUE_TEXT}Request sent to server - waiting on return...{ColoredText.END_TEXT}")
-                                if self.pipeline == 'reflection':
-                                    response, raw_data = self.socket_client.send_persistent_request(
-                                        command=self.pipeline, # not really needed but is part of the structure, so - just repeat pipeline.
-                                        message="Audio chunk",
-                                        binary_data=speech_segment_bytes, # Send as binary data after JSON
-                                        pipeline=self.pipeline # necessary
-                                    )
-                                elif self.pipeline == 'revoice':
-                                    response, raw_data = self.socket_client.send_persistent_request(
-                                        command=self.pipeline, # not really needed but is part of the structure, so - just repeat pipeline.
-                                        message="Audio chunk",
-                                        binary_data=speech_segment_bytes, # Send as binary data after JSON
-                                        pipeline=self.pipeline, # necessary
-                                        voice=self.voice
-                                    )
-                                elif self.pipeline == 'basic_conversational':
-                                    response, raw_data = self.socket_client.send_persistent_request(
-                                        command=self.pipeline, # not really needed but is part of the structure, so - just repeat pipeline.
-                                        message="Audio chunk",
-                                        binary_data=speech_segment_bytes, # Send as binary data after JSON
-                                        pipeline=self.pipeline, # necessary
-                                        voice=self.voice,
-                                        user_id=self.user_id,
-                                        system_prompt_id=self.system_prompt_id,
-                                        player_name=self.player_name,
-                                        continuous_save=self.continuous_save,
-                                        load_previous=self.load_previous
-                                    )
-                                # Response is handled automatically by handle_server_response callback
-
-                            current_audio_buffer = bytearray()
-                            silent_frames_count = 0
-                            has_spoken = False
-
-        except KeyboardInterrupt:
-            pass
-        except Exception as e:
-            logger.error(f"{ColoredText.RED_TEXT}An unexpected error occurred: {e}{ColoredText.END_TEXT}")
-        finally:
-            if self.is_recording:
-                # Send any remaining audio in the buffer
-                if len(current_audio_buffer) > 0 and has_spoken:
-                    logger.info(f"{ColoredText.BLUE_TEXT}Sending final audio chunk to server...{ColoredText.END_TEXT}")
-
-                    self.socket_client.send_persistent_request(
-                        command="transcribe",
-                        message="Final audio chunk",
-                        binary_data=current_audio_buffer  # Send as binary data
-                    )
-
-                self.graceful_shutdown()
-
 
     @staticmethod
     def load_json_config(filepath: str) -> dict:

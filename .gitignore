@@ -10,7 +10,9 @@ __pycache__/
 
 # Personal / assistant notes (not for public repo)
 BRENT.md
+amadeo/
 CLAUDE.md
+AGENTS.md
 
 # Agent working area — scratch space for code-improvement projects (not for public repo)
 agent_projects/

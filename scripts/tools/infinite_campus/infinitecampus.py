@@ -6,8 +6,17 @@ using Microsoft SSO login via Playwright, then hits the IC JSON APIs.
 Prints results to the terminal and emails a summary via Gmail.
 
 SETUP (run these in your terminal first):
-  python -m pip install playwright beautifulsou python-dotenv
+  python -m pip install playwright python-dotenv
   python -m playwright install chromium
+
+  The chromium step is required and separate from pip: playwright ships no browser
+  in its wheel, and without it launch() fails with "Executable doesn't exist".
+  If chromium then fails to start on a missing shared library, install its system
+  deps with: sudo python -m playwright install-deps chromium
+
+  This script also needs SECRETS_FILE set in the SHELL environment (not in the
+  .env itself) - it is read via os.getenv BEFORE load_dotenv() runs, and points at
+  the .env holding the INFINITE_CAMPUS_* credentials. See .env.example.
 
 HOW TO RUN:
   python infinitecampus.py

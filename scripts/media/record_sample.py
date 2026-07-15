@@ -2,8 +2,12 @@ import sounddevice as sd
 import numpy as np
 import scipy.io.wavfile as wavfile
 import time
-from pynput import keyboard
 import sys
+import termios
+import tty
+import select
+
+from amadeo_utils.media_utils.audio_devices import prefer_pulse_defaults
 
 """
 ##########Recording Settings##########
@@ -64,18 +68,50 @@ GAIN = 1.0  # Audio gain multiplier (0.1 to 2.0)
 stop_recording = False
 start_time = None
 
-def on_press(key):
+def wait_for_stop_key():
     """
-    Keyboard listener callback - stops recording when spacebar is pressed.
-    This runs in a separate thread from pynput.
+    Block until the user presses the spacebar in this terminal, or until recording
+    stops for another reason (e.g. the audio callback hitting MAX_RECORDING_TIME).
+
+    Reads this process's own stdin rather than grabbing a global hotkey. Wayland
+    does not permit applications to grab global key events - by design, since that
+    is what a keylogger does - so an X11-based listener silently receives nothing
+    on a Wayland session. Reading our own terminal works identically under
+    Wayland, X11 and over SSH.
+
+    The trade-off is that this terminal must have focus, which is a non-issue for
+    a tool the user is sitting in front of and speaking into.
+
+    :return: None. Sets the global stop_recording flag once a stop is requested.
     """
     global stop_recording
+
+    # Without a TTY (piped/redirected stdin) there is no terminal to reconfigure,
+    # so fall back to waiting for a newline instead of a single keypress.
+    if not sys.stdin.isatty():
+        sys.stdin.readline()
+        stop_recording = True
+        return
+
+    file_descriptor = sys.stdin.fileno()
+    original_settings = termios.tcgetattr(file_descriptor)
+
     try:
-        if key == keyboard.Key.space:
-            stop_recording = True
-            return False  # Stop the listener
-    except AttributeError:
-        pass
+        # cbreak delivers keys as they are typed without waiting for Enter, while
+        # (unlike raw mode) leaving Ctrl+C able to interrupt.
+        tty.setcbreak(file_descriptor)
+
+        while not stop_recording:
+            # Poll rather than block on read() so that stop_recording being set
+            # elsewhere - such as the max-duration guard in the audio callback -
+            # still ends this loop promptly.
+            if select.select([sys.stdin], [], [], 0.1)[0]:
+                if sys.stdin.read(1) == ' ':
+                    stop_recording = True
+    finally:
+        # Always restore the terminal, otherwise a raised exception would leave
+        # the user's shell in cbreak mode with no echo.
+        termios.tcsetattr(file_descriptor, termios.TCSADRAIN, original_settings)
 
 def normalize_audio_int16(audio_data, target_level=-12):
     """
@@ -178,6 +214,10 @@ def record_audio():
     global stop_recording, start_time
     stop_recording = False
 
+    # Route through PulseAudio where available: RATE (24 kHz) is not natively
+    # supported by most raw ALSA capture devices, which reject it outright.
+    prefer_pulse_defaults()
+
     # Quick level check before recording
     check_audio_levels()
 
@@ -234,14 +274,13 @@ def record_audio():
         if stop_recording:
             raise sd.CallbackStop
 
-    # Set up keyboard listener and audio stream
-    with keyboard.Listener(on_press=on_press) as listener:
-        try:
-            # Start audio recording stream
-            with sd.InputStream(samplerate=RATE, channels=CHANNELS, dtype=DTYPE, callback=callback):
-                listener.join()  # Wait for keyboard input
-        except sd.CallbackStop:
-            pass  # Normal termination
+    # Start the audio stream, then block here until the user presses spacebar or
+    # the callback's max-duration guard sets stop_recording.
+    try:
+        with sd.InputStream(samplerate=RATE, channels=CHANNELS, dtype=DTYPE, callback=callback):
+            wait_for_stop_key()
+    except sd.CallbackStop:
+        pass  # Normal termination
 
     print("\n\n⏹️  Recording stopped!")
 

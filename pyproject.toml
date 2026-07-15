@@ -8,65 +8,215 @@ version = "0.1.0"
 description = "A homegrown Python toolkit: AI voice pipelines (ASR/LLM/TTS), a client/server framework, and media + crypto utilities."
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
+# Every conda env here is built on Python 3.12, and some extras cannot go higher:
+# kokoro and its misaki G2P dependency both cap at <3.13, and whisperx at <3.14.
+# The 3.13 classifier applies to amadeo_utils itself, not to the AI extras.
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
+# cryptography is a CORE dependency, not part of any extra: misc_utils/FileEncryption.py
+# uses cryptography.fernet.Fernet with an Argon2id KDF (hence >=46, which needs a
+# modern build). `pip install -e .` pulls it automatically - but installing the pinned
+# deps by hand and relying on PYTHONPATH (the usual workflow here) does NOT, so it has
+# to be listed explicitly in every env that imports amadeo_utils.
 dependencies = [
     "cryptography>=46",
 ]
 
-# NOTE: each extra mirrors a dedicated conda env. numpy/torch versions
-# intentionally DIFFER across extras and are NOT mutually compatible
-# (e.g. tts-f5 needs numpy 1.x, asr needs numpy 2.3). Install only the
-# extra(s) for the component you're running, each in its own environment.
+# NOTE: each extra mirrors a dedicated conda env. numpy/torch versions still
+# differ across extras and are not guaranteed mutually compatible, so install
+# only the extra(s) for the component you're running, each in its own env.
+# (Historically tts-f5 was stuck on numpy 1.x while asr needed 2.x; f5-tts 1.1.9+
+# lifted that cap on Python 3.12, so the two no longer actively conflict - but
+# they are still pinned separately and tested separately.)
 [project.optional-dependencies]
+# The 'stt' conda env. torch/torchaudio/torchvision MUST be installed from the
+# CUDA 12.8 index - plain `pip install torch==2.8.0` fetches a cu126 build whose
+# kernels do not cover Blackwell/sm_120 (RTX 5090), so it fails at runtime with
+# "no kernel image is available for execution on the device":
+#
+#   pip install --index-url https://download.pytorch.org/whl/cu128 \
+#               --extra-index-url https://pypi.org/simple \
+#               torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 whisperx==3.8.6 ...
+#
+# whisperx is 3.8.6, NOT the 3.4.2 used on the old desktop: 3.4.2 caps
+# ctranslate2<4.5.0, and ct2 4.4.0 statically links a pre-Blackwell CUDA and
+# bundles its own cuDNN 8.9.7. Since ctranslate2 (via faster-whisper) does the
+# actual transcription, that pin would strand the GPU path on sm_120 no matter
+# which torch is installed. ct2 >=4.5 ships no bundled cuDNN and dlopens
+# libcublas.so.12, picking up the CUDA 12.8 runtime torch's nvidia-* wheels bring.
+# Also needs system libportaudio2 for sounddevice - see the media/client note below.
 asr = [
     "numpy==2.3.1",
     "sounddevice==0.5.2",
-    "torch==2.7.1",
-    "whisperx==3.4.2",
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
+    "torchvision==0.23.0",
+    "whisperx==3.8.6",
     "webrtcvad-wheels==2.0.14",
 ]
+# The 'llama' conda env. Unlike the torch-based extras, this one cannot be fixed
+# with an index URL: llama-cpp-python ships NO prebuilt wheel with sm_120, so on
+# Blackwell (RTX 5090) it must be BUILT FROM SOURCE against CUDA 12.8:
+#
+#   conda install -c nvidia cuda-toolkit=12.8
+#   export PATH="$CONDA_PREFIX/bin:$PATH"; hash -r      # see PATH note below
+#   export CUDA_HOME="$CONDA_PREFIX" CUDACXX="$CONDA_PREFIX/bin/nvcc"
+#   CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=120" \
+#     pip install --no-cache-dir --no-binary=llama-cpp-python "llama-cpp-python==0.3.9"
+#
+# CMAKE_CUDA_ARCHITECTURES MUST MATCH THE TARGET GPU - 120 is the RTX 5090 only.
+# For the 192.168.1.132 server (RTX 3090 = sm_86, RTX 4070 Ti = sm_89) build for
+# both: -DCMAKE_CUDA_ARCHITECTURES="86;89". Note the source build exists solely
+# because no prebuilt wheel ships sm_120; sm_86/89 are old enough that prebuilt
+# CUDA wheels cover them, so try those first on that box and skip all of this.
+#
+# Use the CONDA CUDA 12.8 toolkit, not the desktop's system CUDA 13.3: 0.3.9's
+# vendored llama.cpp predates CUDA 13. The system nvcc at /usr/local/cuda shadows
+# the conda one because .bashrc re-prepends it AFTER conda activation - hence the
+# PATH override above. All of this is BUILD-time only; runtime just needs
+# `conda activate llama` with no LD_LIBRARY_PATH changes.
+#
+# pyarrow is here because VectorDB persists as parquet and pandas needs an engine.
 llm = [
     "llama-cpp-python==0.3.9",
     "numpy==2.3.1",
     "pandas==2.2.3",
+    "pyarrow==25.0.0",
 ]
+# The 'f5-tts' conda env. As with 'asr', torch MUST come from the CUDA 12.8 index
+# or it resolves to a cu126 build with no Blackwell/sm_120 kernels:
+#
+#   pip install --index-url https://download.pytorch.org/whl/cu128 \
+#               --extra-index-url https://pypi.org/simple \
+#               torch==2.8.0 torchaudio==2.8.0 f5-tts==1.1.21 soundfile==0.13.1
+#
+# f5-tts is 1.1.21, NOT the 1.1.7 used on the old desktop. 1.1.7 hard-caps
+# numpy<=1.26.4 unconditionally; 1.1.9+ made that cap conditional on
+# python_version <= "3.10", so on 3.12 numpy is free. That matters because
+# torch 2.8 is built against numpy 2.x, and it is why numpy no longer has to
+# differ between this extra and 'asr'. The F5TTS constructor and infer()
+# signatures are byte-for-byte identical between 1.1.7 and 1.1.21.
+# gradio and transformers ride along unpinned by f5-tts (gradio is only for its
+# web UI, which we never use).
 tts-f5 = [
-    "f5-tts==1.1.7",
-    "numpy==1.26.4",
+    "f5-tts==1.1.21",
+    "numpy==2.4.6",
     "soundfile==0.13.1",
     "torch==2.8.0",
+    "torchaudio==2.8.0",
 ]
+# The 'kokoro' conda env. As with 'asr' and 'tts-f5', torch MUST come from the
+# CUDA 12.8 index or it resolves to a cu126 build with no Blackwell/sm_120 kernels:
+#
+#   pip install --index-url https://download.pytorch.org/whl/cu128 \
+#               --extra-index-url https://pypi.org/simple \
+#               torch==2.8.0 kokoro==0.9.4 numpy==2.2.6 soundfile==0.13.1
+#
+# 0.9.4 is the latest kokoro (no upgrade decision here, unlike whisperx/f5-tts).
+# Requires python <3.13. No apt espeak-ng needed despite kokoro's docs: its
+# misaki[en] G2P dependency pulls `espeakng-loader`, which ships the espeak-ng
+# binaries as a wheel. kokoro leaves transformers and huggingface-hub unpinned, so
+# both land on their latest majors (5.x / 1.x) - if kokoro breaks on a rebuild,
+# suspect those two before anything else (verified working on transformers 5.13.1
+# + huggingface_hub 1.23.0 as of 2026-07-14).
+#
+# FIRST RUN SELF-MODIFIES THE ENV: misaki's G2P calls spacy's downloader at runtime
+# and pip-installs `en_core_web_sm` (~12.8 MB) into the env mid-startup. So the
+# first run needs network access and a writable env - it is not a pure-inference
+# process. Do it up front instead, as a post-install step:
+#
+#   python -m spacy download en_core_web_sm
+#
+# It CANNOT be listed as a dependency below: spacy models are not on PyPI (pip
+# fails with "No matching distribution found"), they are served from Explosion's
+# own GitHub releases. Pinning the release URL directly would work but rots - the
+# model version is tied to the spacy version, and spacy arrives unpinned via
+# misaki[en], so a hard-coded en_core_web_sm URL silently mismatches the day spacy
+# bumps. `spacy download` always fetches the model matching the installed spacy.
 tts-kokoro = [
     "kokoro==0.9.4",
     "numpy==2.2.6",
     "soundfile==0.13.1",
     "torch==2.8.0",
 ]
+# The 'media' conda env installs BOTH 'media' and 'client' (it runs the
+# scripts/media tools *and* the AI clients); their pins are deliberately
+# identical where they overlap so the two merge cleanly.
+#
+# System (non-pip) deps for both extras:
+#   libportaudio2      - sounddevice does NOT bundle PortAudio on Linux and raises
+#                        "PortAudio library not found" at import without it.
+#                        Use the DISTRO package: sudo apt install libportaudio2
+#                        Do NOT use conda-forge's portaudio on a desktop: it is
+#                        built ALSA-only and ships its own alsa-lib with no
+#                        alsa.conf.d, so it never sees PipeWire/PulseAudio. You get
+#                        raw hw: devices only, which means no resampling (24k/16k
+#                        requests die with "Invalid sample rate [PaErrorCode -9997]"),
+#                        indices that renumber on hotplug, and no Bluetooth at all.
+#                        Ubuntu's build includes the PulseAudio host API; combine it
+#                        with prefer_pulse_defaults() from media_utils/audio_devices.
+#   pulseaudio-utils   - pactl/parec, spawned by media_utils/audio_capture.py
+#   ffmpeg             - only for extract_audio.py on VIDEO inputs (.mp4/.webm/
+#                        .mov/...): libsndfile covers wav/flac/ogg/mp3 natively,
+#                        anything else falls back to audioread, which shells to ffmpeg.
 client = [
     "numpy==2.2.6",
     "pygame==2.6.1",
-    "playsound==1.3.0",
-    "scikit-learn==1.7.1",
     "sounddevice==0.5.2",
     "webrtcvad-wheels==2.0.14",
 ]
+# NOTE: pynput was deliberately REMOVED - do not add it back. It was used only for
+# record_sample.py's global spacebar hotkey, which cannot work on a Wayland session
+# (Wayland forbids apps from grabbing global key events, so pynput's X11 listener
+# registers and then silently never fires). record_sample.py now reads its own stdin
+# in termios cbreak mode instead, which works on Wayland, X11 and over SSH alike.
 media = [
     "librosa==0.11.0",
     "noisereduce==3.0.3",
     "numpy==2.2.6",
-    "pynput==1.8.1",
     "scipy==1.16.1",
     "sounddevice==0.5.2",
     "soundfile==0.13.1",
     "webrtcvad-wheels==2.0.14",
 ]
+# The 'bash' conda env (BASH = Boyertown Area School District), for
+# scripts/tools/infinite_campus/infinitecampus.py. The only env with no GPU, no
+# torch, and no amadeo_utils import - so it needs neither cryptography nor
+# PYTHONPATH.
+#
+# REQUIRES A POST-INSTALL STEP - playwright ships no browser in its wheel:
+#
+#   python -m playwright install chromium
+#
+# Without it, launch() fails with "Executable doesn't exist". If chromium then
+# fails on a missing shared library, add its system deps (needs sudo):
+#   sudo python -m playwright install-deps chromium
+#
+# playwright is 1.61.0, NOT the 1.58.0 used on the old desktop. Playwright checks
+# the host distro against a hard-coded list before downloading a browser, and 1.58.0
+# only knows ubuntu20.04/22.04/24.04 - on this Ubuntu 26.04 desktop it refuses with
+# "Playwright does not support chromium on ubuntu26.04-x64". 1.61.0 is the FIRST
+# release that knows ubuntu26.04 (verified: 1.58, 1.59 and 1.60 all lack it), so
+# this is a hard floor, not a preference. Nothing to do with the GPU - it is simply
+# a newer OS than the old pin had ever heard of.
+#
+# Keep it PINNED (just at a newer version): playwright's browser binaries are
+# version-matched to the library, so a floating version can expect a browser
+# revision that is not installed. Re-check this pin when the OS is upgraded.
+# NOTE: the script's docstring used to say to install beautifulsoup - it does not
+# use it, and it is deliberately not listed here.
 infinite-campus = [
-    "playwright==1.58.0",
+    "playwright==1.61.0",
     "python-dotenv==1.2.2",
+]
+# yt-dlp is intentionally UNPINNED: sites change constantly and stale versions
+# break, so keep it on the latest (pip install -U yt-dlp). Also needs a system
+# ffmpeg (e.g. conda install -c conda-forge ffmpeg) to merge video+audio streams.
+youtubedl = [
+    "yt-dlp",
 ]
 
 [tool.setuptools.packages.find]

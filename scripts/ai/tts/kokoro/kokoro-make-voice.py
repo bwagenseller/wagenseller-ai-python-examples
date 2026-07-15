@@ -27,6 +27,16 @@ The knobs (all composable in a single run):
              nearly orthogonal - old and young are different departures from "adult", not opposites. Unit-norm; +-1.0..2.0 is the useful range, and
              at +2.0 you are essentially AT santa, so stay lower to remain distinct.
   --british  +x toward British English, -x toward American (per-gender-averaged axis between the b* and a* voices)
+  --accent   shift toward one of the pack's other language groups: spanish, french, hindi, italian, japanese, portuguese, chinese (or british,
+             same as --british 1.0). The new voice still SPEAKS ENGLISH - this is "a person from that country speaking English", with the accent
+             carried entirely by the embedding (do not reach for --language-code, which only changes how the sample .wav text is phonemized).
+             Each axis is built like the British one - per-gender group-mean deltas against the American voices - then
+             cleaned: the age outliers (the santas, the zm_yunxia boy) are excluded and the gender/age components are projected out, so the knob
+             moves accent without dragging gender or age along. --accent-amount scales it: 1.0 = the ear-calibrated "new person from that
+             country" strength (each language's axis is pre-scaled to its verified sweet spot - delta ~2.5-3.3 - chinese runs slightly lower
+             because it tins out early), ~0.5 = the same person with a lighter accent. Two notes from calibration: the spanish and portuguese
+             packs are literally the same speakers (axes 93% identical), and the french axis is built from a single voice (ff_siwis), so high
+             amounts inherit some of her personal identity.
   --alpha    extrapolation: out = ref + alpha * (base - ref). 0..1 is ordinary blending; >1 exaggerates whatever makes base distinct from --ref
              (default ref: the average of all voices). 1.5..2.5 is the useful range.
   --strength random perturbation sampled from the pack's top principal components, scaled by per-PC std - this stays on the "plausible human
@@ -50,6 +60,16 @@ Examples:
 
     # an older, more masculine, slightly British af_bella, scaled to "clearly a new person"
     python kokoro-make-voice.py --base af_bella --gender -0.8 --age 1.0 --british 1.0 --target-distance 2.5
+
+    # a French woman derived from af_heart (full calibrated accent), and a lightly Italian-accented af_heart
+    python kokoro-make-voice.py --base af_heart --accent french
+    python kokoro-make-voice.py --base af_heart --accent italian --accent-amount 0.5
+
+    # accents compose with the other knobs: an older man with a moderate Hindi accent, derived from am_adam
+    python kokoro-make-voice.py --base am_adam --age 0.8 --accent hindi --accent-amount 0.7 --file-name "hindi_uncle"
+
+    # a lightly Japanese-accented stranger near af_sarah (seeded perturbation + accent, capped at new-person distance)
+    python kokoro-make-voice.py --base af_sarah --strength 1.0 --seed 7 --accent japanese --accent-amount 0.5 --target-distance 2.5
 """
 
 import argparse
@@ -84,6 +104,14 @@ COMMON_VOICES = ['af_alloy', 'af_aoede', 'af_bella', 'af_heart', 'af_jessica', '
     'ff_siwis', 'hf_alpha', 'hf_beta', 'hm_omega', 'hm_psi', 'if_sara', 'im_nicola', 'jf_alpha', 'jf_gongitsune', 'jf_nezumi',
     'jf_tebukuro', 'jm_kumo', 'pf_dora', 'pm_alex', 'pm_santa', 'zf_xiaobei', 'zf_xiaoni', 'zf_xiaoxiao', 'zf_xiaoyi', 'zm_yunjian',
     'zm_yunxi', 'zm_yunxia', 'zm_yunyang']
+
+# Accent axes: language prefix in the pack, and the ear-calibrated scale that lands --accent-amount 1.0 in the
+# "convincing accent, no artifacts" zone (delta ~2.5-3.3; chinese tins out earlier so it sits lower).
+ACCENTS = {'spanish': ('e', 1.75), 'french': ('f', 1.25), 'hindi': ('h', 1.5), 'italian': ('i', 1.5),
+           'japanese': ('j', 1.5), 'portuguese': ('p', 1.8), 'chinese': ('z', 1.3)}
+
+# Voices whose defining trait is age, not language - excluded when measuring accent so the axes stay age-neutral.
+AGE_OUTLIERS = {'am_santa', 'em_santa', 'pm_santa', 'zm_yunxia'}
 
 
 def load_voices(language_code: str, repo_id: str, voices_dir: str = None):
@@ -129,14 +157,15 @@ def voice_axes(voice_data: dict):
         voice_data: A dictionary of voice name -> (510, 256) numpy array; should contain the full official pack.
     Returns:
         A dict with: 'means' (per-voice mean vectors), 'names', 'gender' (masc->fem axis), 'elderly' and 'youth'
-        (unit-norm age axes), 'british' (American->British axis), 'pcs' (top principal components), 'pc_stds'.
+        (unit-norm age axes), 'british' (American->British axis), 'accents' (per-language axes, pre-scaled so
+        --accent-amount 1.0 is the calibrated strength), 'pcs' (top principal components), 'pc_stds'.
     """
     names = list(voice_data)
     means = np.stack([v.mean(axis=0) for v in voice_data.values()])
     by = dict(zip(names, means))
 
-    def group_mean(prefixes):
-        rows = [by[n] for n in names if any(n.startswith(p) for p in prefixes)]
+    def group_mean(prefixes, exclude=()):
+        rows = [by[n] for n in names if any(n.startswith(p) for p in prefixes) and n not in exclude]
         return np.mean(rows, axis=0)
 
     gender = group_mean(['af_', 'bf_']) - group_mean(['am_', 'bm_'])
@@ -152,12 +181,27 @@ def voice_axes(voice_data: dict):
     elderly /= np.linalg.norm(elderly)
     youth /= np.linalg.norm(youth)
 
+    # Accent axes: per-gender deltas vs the American voices (age outliers excluded), averaged, then the
+    # gender/age components projected out so the knob doesn't secretly shift gender or age.
+    confounds = [gender / np.linalg.norm(gender), elderly, youth]
+    accents = {'british': british}
+    for accent, (code, scale) in ACCENTS.items():
+        deltas = []
+        for sex in 'fm':
+            pool = [by[n] for n in names if n.startswith(code + sex + '_') and n not in AGE_OUTLIERS]
+            if pool:
+                deltas.append(np.mean(pool, axis=0) - group_mean([f'a{sex}_'], exclude=AGE_OUTLIERS))
+        axis = np.mean(deltas, axis=0)
+        for confound in confounds:
+            axis -= (axis @ confound) * confound
+        accents[accent] = scale * axis
+
     centered = means - means.mean(axis=0)
     _, S, Vt = np.linalg.svd(centered, full_matrices=False)
     pc_stds = S / np.sqrt(len(names) - 1)
 
     return {'means': means, 'names': names, 'gender': gender, 'elderly': elderly,
-            'youth': youth, 'british': british, 'pcs': Vt, 'pc_stds': pc_stds}
+            'youth': youth, 'british': british, 'accents': accents, 'pcs': Vt, 'pc_stds': pc_stds}
 
 
 def build_voice(voice_data: dict, axes: dict, args) -> tuple:
@@ -192,6 +236,12 @@ def build_voice(voice_data: dict, axes: dict, args) -> tuple:
     if args.british != 0.0:
         delta += args.british * axes['british']
         tags.append(f"b{args.british:+g}")
+
+    if args.accent:
+        delta += args.accent_amount * axes['accents'][args.accent]
+        tags.append(f"{args.accent}{args.accent_amount:+g}")
+    elif args.accent_amount != 1.0:
+        print("Note: --accent-amount does nothing without --accent (which language did you want?).")
 
     if args.strength != 0.0:
         rng = np.random.default_rng(args.seed)
@@ -261,6 +311,10 @@ def get_args_dict():
     parser.add_argument('--gender', type=float, default=0.0, help='Shift toward feminine (+) or masculine (-); +-1.5 is person-scale.')
     parser.add_argument('--age', type=float, default=0.0, help='Shift toward elderly (+) or child (-); useful range +-1.0..2.0 (at +2.0 you basically ARE santa).')
     parser.add_argument('--british', type=float, default=0.0, help='Shift toward British (+) or American (-) English.')
+    parser.add_argument('--accent', default=None, choices=sorted(list(ACCENTS) + ['british']),
+                        help='Shift toward another language group in the pack (accented English - the output still speaks English).')
+    parser.add_argument('--accent-amount', type=float, default=1.0,
+                        help='Strength of --accent; 1.0 = the calibrated "new person from that country" level, ~0.5 = a lighter accent.')
     parser.add_argument('--alpha', type=float, default=1.0, help='Extrapolation factor; >1 exaggerates what makes --base distinct from --ref. Useful range 1.5..2.5.')
     parser.add_argument('--ref', default=None, help='Reference voice for --alpha (default: the average of all voices).')
     parser.add_argument('--strength', type=float, default=0.0, help='Random perturbation along the voice manifold; useful range 1.0..1.4.')
@@ -269,7 +323,8 @@ def get_args_dict():
     parser.add_argument('--file-name', default='', help='The base of the output filenames (.pt and .wav). Do not include an extension.')
     parser.add_argument('--output-dir', default=OUTPUT_DIR, help='Where to write the output files.')
     parser.add_argument('--voices-dir', default=None, help='Local directory of official voice .pt files; required if the kokoro package is not installed.')
-    parser.add_argument('--language-code', default=LANGUAGE_CODE, help='The language code; a = American English, British English = b, Spanish = e, French = f, Italian = i, Brazilian Portuguese = p, Hindi = h.')
+    parser.add_argument('--language-code', default=LANGUAGE_CODE, help='The language code; a = American English, British English = b, Spanish = e, French = f, Italian = i, Brazilian Portuguese = p, Hindi = h. '
+                        'This only sets how the sample .wav text is phonemized - for an accent, use --accent, not this.')
     parser.add_argument('--repo-id', default=REPO_ID, help="The repo ID - the vast majority of people use 'hexgrad/Kokoro-82M'.")
     return parser.parse_args()
 

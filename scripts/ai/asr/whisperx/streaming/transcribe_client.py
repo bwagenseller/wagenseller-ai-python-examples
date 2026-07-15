@@ -6,6 +6,7 @@ import webrtcvad
 import argparse
 from amadeo_utils.colored_text import ColoredText
 from amadeo_utils.client.amadeo_client import AmadeoClient
+from amadeo_utils.media_utils.audio_devices import prefer_pulse_defaults
 import logging
 
 # Configure logging to show timestamps and log levels
@@ -104,6 +105,10 @@ class WhisperXClient:
                 return
 
             logger.info(f"{ColoredText.BLUE_TEXT}Starting microphone stream. Press Ctrl+C to exit.{ColoredText.END_TEXT}")
+
+            # Route through PulseAudio where available: raw ALSA capture devices
+            # reject SAMPLE_RATE (16 kHz) outright rather than resampling.
+            prefer_pulse_defaults()
 
             # Initialize VAD and audio processing variables
             vad = webrtcvad.Vad(self.args_dict['vad_aggressiveness'])

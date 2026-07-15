@@ -73,7 +73,7 @@ def main():
 
     # Create and start the TTS server
     try:
-        logger.info("Starting F5-TTS Server...")
+        logger.info("Starting Kokoro TTS Server...")
         server = TTSServer(arg_dict)
         server.server.start_server()
     except KeyboardInterrupt:
