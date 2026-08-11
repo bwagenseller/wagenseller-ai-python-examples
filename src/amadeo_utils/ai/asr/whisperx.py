@@ -1,4 +1,18 @@
 
+import os
+
+# CUDA numbers GPUs by 'FASTEST_FIRST' unless told otherwise, which ranks them by compute
+# capability rather than by the slot they sit in - so CUDA's device 0 is not necessarily the
+# device 0 that 'nvidia-smi' reports. On a mixed pair such as an RTX 3090 (sm_86) alongside an
+# RTX 4070 Ti (sm_89), CUDA puts the newer-architecture 4070 Ti first even though nvidia-smi
+# lists the 3090 first, so '--gpu 0' would silently pick the opposite card to the one the user
+# was looking at. 'PCI_BUS_ID' orders by physical slot, which is what nvidia-smi shows and what
+# anyone reading '--gpu 0' will expect.
+#
+# This has to be set before CUDA is initialised, hence before torch is imported rather than in
+# the constructor. setdefault is used so that an explicit setting in the environment still wins.
+os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+
 import threading
 import json
 import gc
@@ -10,7 +24,6 @@ import logging
 from typing import Dict, Any, Tuple
 from whisperx.audio import N_SAMPLES, log_mel_spectrogram
 from amadeo_utils.colored_text import ColoredText
-from amadeo_utils.server.amadeo_server import AmadeoServer
 
 """
 This is a basic implementation of WhisperX, an ASR (speech to text) library. Its a basic implementation. It was primarily built for responding from a server (handle_client_request acts as a callback function for a larger server script), but you can use it independently, too, 
@@ -77,14 +90,64 @@ class AmadeoWhisperX:
     WHISPER_MODEL_NAME = "large-v3"
     LANGUAGE_CODE = "en"
     COMBINED_CONFIDENCE_CUTOFF = 1.0
+    GPU_INDEX = 0
 
     def __init__(self, argsDict: dict):
         self.args_dict = argsDict
         # --- Configuration and Global Resources ---
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.compute_type = "float16" if self.device == "cuda" else "int8"
 
-        self.server = AmadeoServer(argsDict['host'], argsDict['port'], additional_client_functionality = self.handle_client_request)
+        # Which physical GPU to run on. Absent from the dictionary (i.e. when this class is used
+        # outside of the server script) it falls back to the first GPU, which is the only index
+        # guaranteed to exist on a CUDA machine.
+        self.gpu_index = argsDict.get('gpu', AmadeoWhisperX.GPU_INDEX)
+
+        if torch.cuda.is_available():
+            device_count = torch.cuda.device_count()
+
+            # Fail at startup rather than quietly transcribing on the wrong card - a silent
+            # fallback would look identical to success while ignoring what was asked for.
+            if self.gpu_index < 0 or self.gpu_index >= device_count:
+                raise ValueError(f"Requested GPU index {self.gpu_index} does not exist; this machine has {device_count} CUDA device(s), so valid indexes are 0 through {device_count - 1}.")
+
+            # This class runs behind a threaded server, and torch tracks the 'current' device per
+            # thread rather than per process. Pinning it here only fixes the thread doing the
+            # loading; every worker thread has to pin it again before it touches the GPU (see
+            # _bind_thread_to_gpu), otherwise that thread would silently default back to GPU 0.
+            torch.cuda.set_device(self.gpu_index)
+
+            # Two different device spellings are needed downstream, because the two model stacks
+            # do not agree on how a GPU is named:
+            #  * torch_device ('cuda:N') is for the alignment model and whisperx.align, which are
+            #    plain PyTorch and understand an indexed device string.
+            #  * ct2_device ('cuda') plus a separate device_index is for whisperx.load_model,
+            #    which sits on faster-whisper/CTranslate2. CTranslate2 accepts only the bare
+            #    'cuda' here and rejects 'cuda:N', so the index travels as its own argument.
+            self.device = f"cuda:{self.gpu_index}"
+            self.ct2_device = "cuda"
+            self.compute_type = "float16"
+
+            logger.info(f"{ColoredText.BLUE_TEXT}WhisperXServer: Using GPU {self.gpu_index} ({torch.cuda.get_device_name(self.gpu_index)}) of {device_count} available.{ColoredText.END_TEXT}")
+        else:
+            # No CUDA at all - the GPU index is meaningless, so note that it is being ignored
+            # instead of letting the caller assume it took effect.
+            if self.gpu_index != AmadeoWhisperX.GPU_INDEX:
+                logger.warning(f"A GPU index ({self.gpu_index}) was requested but no CUDA device is available; falling back to CPU and ignoring the index.")
+
+            # Reset the index so the rest of the class does not have to keep asking whether it is
+            # meaningful; on CPU it is simply unused.
+            self.gpu_index = AmadeoWhisperX.GPU_INDEX
+            self.device = "cpu"
+            self.ct2_device = "cpu"
+            self.compute_type = "int8"
+
+        # Convenience flag - self.device is now 'cuda:N' rather than a bare 'cuda', so string
+        # comparisons against "cuda" elsewhere would no longer hold.
+        self.use_cuda = (self.ct2_device == "cuda")
+
+        # NOTE: this class deliberately does NOT build its own AmadeoServer. The runnable script
+        # that owns the host/port (scripts/ai/asr/whisperx/streaming/transcribe_server.py) builds
+        # the server and hands it this class's handle_client_request as a callback, which is the
+        # same arrangement the Kokoro, F5 and llama services use.
 
         # set this lock, which will 'lock' the GPU for its own purposes (really, it locks the methods that WhisperX uses to interact with the GPU)
         self.gpu_lock = threading.Lock()
@@ -102,12 +165,32 @@ class AmadeoWhisperX:
 
         # --- WhisperX Setup ---
         logger.info(f"{ColoredText.BLUE_TEXT}WhisperXServer: Loading WhisperX model '{self.args_dict['model']}' on {self.device} with {self.compute_type}...{ColoredText.END_TEXT}")
-        self.asr_model = whisperx.load_model(self.args_dict['model'], device=self.device, compute_type=self.compute_type)
+        # device/device_index are split here for the CTranslate2 reason described in __init__.
+        self.asr_model = whisperx.load_model(self.args_dict['model'], device=self.ct2_device, device_index=self.gpu_index, compute_type=self.compute_type)
         logger.info(f"{ColoredText.BLUE_TEXT}WhisperXServer: ASR model loaded.{ColoredText.END_TEXT}")
         logger.info(f"{ColoredText.BLUE_TEXT}WhisperXServer: Loading WhisperX alignment model for language model '{self.args_dict['language_code']}' on {self.device}.. {ColoredText.END_TEXT}")
 
         self.align_model, self.metadata = whisperx.load_align_model(language_code=self.args_dict['language_code'], device=self.device)
         logger.info(f"{ColoredText.BLUE_TEXT}WhisperXServer: Alignment model loaded.{ColoredText.END_TEXT}")
+
+    def _bind_thread_to_gpu(self):
+        """
+        Pin the calling thread to the GPU this instance was configured for.
+
+        torch stores the 'current' CUDA device per thread, and it always starts out as device 0.
+        AmadeoServer hands every client connection to a fresh thread, so a thread that has not
+        been pinned would send any torch work that was given a bare 'cuda' device - most notably
+        the VAD stage inside the ASR pipeline - to GPU 0 regardless of what was asked for. On a
+        single GPU machine that is invisible; on a multi GPU machine it silently splits the work
+        across cards. Calling this at the top of each GPU bound request keeps every thread on the
+        same card.
+
+        This is a no-op when running on CPU.
+
+        :return: None
+        """
+        if self.use_cuda:
+            torch.cuda.set_device(self.gpu_index)
 
     def get_transcription(self, data:bytes = None):
         """
@@ -181,89 +264,118 @@ class AmadeoWhisperX:
 
             logger.debug(f"{ColoredText.YELLOW_TEXT}[{sessionID}]{ColoredText.END_TEXT}{ColoredText.CYAN_TEXT} Processing job{ColoredText.END_TEXT}")
 
-            with self.gpu_lock:
-                try:
+            try:
 
-                    # Since the audio is in the format of what the Python library 'sounddevice' produces from a mic (see description above), we need to convert to what WhisperX is expecting,
-                    # which is a 32 bit floating point audio (i.e. np.frombuffer(data, dtype=np.int16).astype(np.float32)) with values normalized between -1 and 1 (i.e. MAX_POSITIVE_INT16_VALUE_AS_FLOAT, which normalizes
-                    # from int16 range (-32,768 to +32,767) to float32 range (-1.0 to +1.0))
-                    # NOTE: WhisperX _EXCLUSIVELY_ uses a 16k Sample rate! If its higher, WhisperX will downsample, but....why waste the bandwidth if its just going to resample
-                    audio_segment_np = np.frombuffer(data, dtype=np.int16).astype(np.float32) / AmadeoWhisperX.MAX_POSITIVE_INT16_VALUE_AS_FLOAT
+                # ------------------------------------------------------------------ CPU only work
+                # Nothing below touches the GPU, so it is deliberately done before the lock is
+                # taken - decoding the client's audio while another client is mid transcription
+                # costs that client nothing.
+                #
+                # Since the audio is in the format of what the Python library 'sounddevice' produces from a mic (see description above), we need to convert to what WhisperX is expecting,
+                # which is a 32 bit floating point audio (i.e. np.frombuffer(data, dtype=np.int16).astype(np.float32)) with values normalized between -1 and 1 (i.e. MAX_POSITIVE_INT16_VALUE_AS_FLOAT, which normalizes
+                # from int16 range (-32,768 to +32,767) to float32 range (-1.0 to +1.0))
+                # NOTE: WhisperX _EXCLUSIVELY_ uses a 16k Sample rate! If its higher, WhisperX will downsample, but....why waste the bandwidth if its just going to resample
+                audio_segment_np = np.frombuffer(data, dtype=np.int16).astype(np.float32) / AmadeoWhisperX.MAX_POSITIVE_INT16_VALUE_AS_FLOAT
 
-                    audio_for_lang_detect = whisperx.audio.pad_or_trim(audio_segment_np)
+                audio_for_lang_detect = whisperx.audio.pad_or_trim(audio_segment_np)
 
-                    detected_language, language_confidence = detect_language_with_probability(self.asr_model, audio_for_lang_detect)
+                # ------------------------------------------------------------------ GPU only work
+                # The lock is held for the model calls and nothing else. The models are shared
+                # across every client thread and are not safe to call concurrently, but a client
+                # holding a session open is not a reason to keep the GPU to itself - so the lock
+                # is scoped to this request's inference, not to the connection.
+                #
+                # Waiting here is a plain block rather than a 'GPU busy' rejection: a handful of
+                # household clients doing one or two second jobs will not queue up long enough
+                # for that to be worth the extra protocol.
+                aligned_result = None
 
-                    result = self.asr_model.transcribe(audio_segment_np, batch_size=1, language=detected_language)
+                with self.gpu_lock:
+                    try:
+                        # Every server thread has to claim the configured GPU for itself; see
+                        # _bind_thread_to_gpu for why this is not just done once at startup.
+                        self._bind_thread_to_gpu()
 
-                    full_text = ""
-                    average_word_confidence = 0.0
+                        detected_language, language_confidence = detect_language_with_probability(self.asr_model, audio_for_lang_detect)
 
-                    if result and "segments" in result and result["segments"]:
-                        aligned_result = whisperx.align(result["segments"], self.align_model, self.metadata, audio_segment_np, device=self.device)
+                        result = self.asr_model.transcribe(audio_segment_np, batch_size=1, language=detected_language)
 
-                        word_confidences = []
-                        for segment in aligned_result["segments"]:
-                            if "words" in segment:
-                                for word_info in segment["words"]:
-                                    if "word" in word_info and "score" in word_info:
-                                        word_confidences.append(word_info["score"])
-                                        full_text += f"{word_info['word']} "
+                        if result and "segments" in result and result["segments"]:
+                            aligned_result = whisperx.align(result["segments"], self.align_model, self.metadata, audio_segment_np, device=self.device)
 
-                        if word_confidences:
-                            average_word_confidence = sum(word_confidences) / len(word_confidences)
+                    finally:
+                        # Release this request's VRAM before handing the lock on, so the next
+                        # client's peak allocation does not have to sit alongside this one's
+                        # leftovers. empty_cache() acts on the calling thread's current device,
+                        # which _bind_thread_to_gpu has already set to the right card.
+                        gc.collect()
+                        if self.use_cuda:
+                            torch.cuda.empty_cache()
 
-                        # The `full_text` from the loop above will have a trailing space.
-                        full_text = full_text.strip()
+                # ------------------------------------------------------------------ CPU only work
+                # Scoring the words and assembling the response is pure Python, so it happens
+                # after the lock has been released and the next client is already under way.
+                full_text = ""
+                average_word_confidence = 0.0
 
-                    if full_text == "":
-                        msg = f"Blank transcription generated."
-                        response = {
-                            'success': True,
-                            'type': 'garbage_transcription',
-                            "message": msg,
-                            'file_size': 0
-                        }
-                        logger.debug(msg)
-                    elif (self.args_dict['combined_confidence_cutoff'] > (language_confidence + average_word_confidence)):
-                        msg = f"Transcription blocked due to low confidence score."
-                        response = {
-                            'success': True,
-                            'type': 'garbage_transcription',
-                            "message": msg,
-                            "transcription": full_text,
-                            "detected_language": detected_language,
-                            "language_confidence": language_confidence,
-                            "average_word_confidence": average_word_confidence,
-                            'file_size': 0
-                        }
-                        logger.debug(msg)
-                    else:
-                        response = {
-                            'success': True,
-                            'type': 'transcription',
-                            "transcription": full_text,
-                            "message": '',
-                            "detected_language": detected_language,
-                            "language_confidence": language_confidence,
-                            "average_word_confidence": average_word_confidence,
-                            'file_size': 0
-                        }
+                if aligned_result is not None:
+                    word_confidences = []
+                    for segment in aligned_result["segments"]:
+                        if "words" in segment:
+                            for word_info in segment["words"]:
+                                if "word" in word_info and "score" in word_info:
+                                    word_confidences.append(word_info["score"])
+                                    full_text += f"{word_info['word']} "
 
-                        logger.info(f"Transcription completed and sent. Lang: {detected_language} ({language_confidence:.2f}), Avg Conf: {average_word_confidence:.2f}")
+                    if word_confidences:
+                        average_word_confidence = sum(word_confidences) / len(word_confidences)
 
-                except Exception as e:
-                    logger.warning(f"Error during transcription: {e}")
+                    # The `full_text` from the loop above will have a trailing space.
+                    full_text = full_text.strip()
+
+                if full_text == "":
+                    msg = f"Blank transcription generated."
                     response = {
-                        'success': False,
-                        "message": str(e),
+                        'success': True,
+                        'type': 'garbage_transcription',
+                        "message": msg,
+                        'file_size': 0
+                    }
+                    logger.debug(msg)
+                elif (self.args_dict['combined_confidence_cutoff'] > (language_confidence + average_word_confidence)):
+                    msg = f"Transcription blocked due to low confidence score."
+                    response = {
+                        'success': True,
+                        'type': 'garbage_transcription',
+                        "message": msg,
+                        "transcription": full_text,
+                        "detected_language": detected_language,
+                        "language_confidence": language_confidence,
+                        "average_word_confidence": average_word_confidence,
+                        'file_size': 0
+                    }
+                    logger.debug(msg)
+                else:
+                    response = {
+                        'success': True,
+                        'type': 'transcription',
+                        "transcription": full_text,
+                        "message": '',
+                        "detected_language": detected_language,
+                        "language_confidence": language_confidence,
+                        "average_word_confidence": average_word_confidence,
                         'file_size': 0
                     }
 
-                finally:
-                    gc.collect()
-                    if self.device == "cuda":
-                        torch.cuda.empty_cache()
+                    logger.info(f"Transcription completed and sent. Lang: {detected_language} ({language_confidence:.2f}), Avg Conf: {average_word_confidence:.2f}")
+
+            except Exception as e:
+                logger.warning(f"Error during transcription: {e}")
+                response = {
+                    'success': False,
+                    "message": str(e),
+                    'file_size': 0
+                }
 
 
         else:
@@ -292,6 +404,7 @@ class AmadeoWhisperX:
         parser.add_argument("-p", "--port", type=int, default=AmadeoWhisperX.PORT,help="The port that the server will listen on for requests.")
         parser.add_argument("-m", "--model", default=AmadeoWhisperX.WHISPER_MODEL_NAME,help="The Whisper model to use.")
         parser.add_argument("-l", "--language_code", default=AmadeoWhisperX.LANGUAGE_CODE,help="The default language code.")
+        parser.add_argument("-g", "--gpu", type=int, default=AmadeoWhisperX.GPU_INDEX,help="The index of the CUDA GPU to load the models onto, matching the order 'nvidia-smi -L' reports (0 for the first GPU, 1 for the second, and so on); the ordering is pinned to the physical slot order via CUDA_DEVICE_ORDER, so it does not depend on which card CUDA considers fastest. Defaults to the first GPU. Ignored if no CUDA device is available.")
         parser.add_argument("-ccc", "--combined_confidence_cutoff", type=float, default=AmadeoWhisperX.COMBINED_CONFIDENCE_CUTOFF,help="Each transcription has a confidence score (0-1) for the language and then an average confidence score for the words; if both of these numbers, summed, are less than this, the transcription will not be sent back to the client (as it is probably a false reading).")
 
         argDict = {}
@@ -303,9 +416,10 @@ class AmadeoWhisperX:
             argDict['port'] = args.port
             argDict['model'] = args.model
             argDict['language_code'] = args.language_code
+            argDict['gpu'] = args.gpu
             argDict['combined_confidence_cutoff'] = args.combined_confidence_cutoff
 
-            logger.debug(f"{ColoredText.BLUE_TEXT}WhisperXUtils.get_args_dict_server: Config loaded; host: {argDict['host']} port: {argDict['port']} model: {argDict['model']}.{ColoredText.END_TEXT}")
+            logger.debug(f"{ColoredText.BLUE_TEXT}WhisperXUtils.get_args_dict_server: Config loaded; host: {argDict['host']} port: {argDict['port']} model: {argDict['model']} gpu: {argDict['gpu']}.{ColoredText.END_TEXT}")
 
         except SystemExit as e:
             argDict = {}
