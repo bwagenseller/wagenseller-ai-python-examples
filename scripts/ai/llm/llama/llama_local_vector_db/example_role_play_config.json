@@ -1,0 +1,11 @@
+{
+    "player_name": "Kevin",
+    "base_convo_dir": "/home/kevin/ai/chat_history",
+    "convo_name": "my_chat",
+    "override_base_convo_dir": true,
+    "system_prompt_file": "/home/kevin/ai/system_prompt.txt",
+
+    "encrypted": false,
+
+    "debug": false
+}

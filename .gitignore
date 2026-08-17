@@ -19,6 +19,7 @@ zz.THIS-IS-LOCAL.md
 
 # Agent working area — scratch space for code-improvement projects (not for public repo)
 agent_projects/
+agentic_projects/
 
 # Backups / leftovers
 *.ORIG

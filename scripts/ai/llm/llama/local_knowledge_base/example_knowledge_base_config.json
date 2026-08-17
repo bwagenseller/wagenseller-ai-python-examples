@@ -1,0 +1,6 @@
+{
+    "knowledge_base_file": "/home/kevin/ai/knowledge_base.jsonl",
+    "system_prompt_file": "/home/kevin/ai/system_prompt.txt",
+
+    "debug": false
+}

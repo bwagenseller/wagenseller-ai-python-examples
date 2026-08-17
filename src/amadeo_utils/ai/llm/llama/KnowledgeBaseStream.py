@@ -2,16 +2,20 @@ import os
 import sys
 import logging
 import numpy as np
+
+# IMPORTANT: llama_utils MUST be imported before llama_cpp. Importing llama_cpp loads the llama.cpp shared library,
+# which registers its GGML CUDA backend and pins the device ordering for the life of the process; llama_utils sets
+# CUDA_DEVICE_ORDER at import time so that '--gpu N' means the Nth card as 'nvidia-smi -L' lists it. Flip these two
+# lines and the GPU selection silently reverts to CUDA's own 'fastest first' ordering.
+from amadeo_utils.ai.llm.llama.llama_utils import LlamaUtils
 from llama_cpp import Llama
+
 from typing import Dict, Any, Optional, List, Callable
 from amadeo_utils.ai.llm.vector_database.VectorDB import VectorDB
-from amadeo_utils.ai.llm.llama.llama_utils import LlamaUtils
 from amadeo_utils.colored_text import ColoredText
-from amadeo_utils.ai.llm.llama.subjective_constants import SubjectiveConstants
 import threading
 from datetime import datetime
 import time
-import argparse
 import json
 import gc
 
@@ -46,11 +50,31 @@ class KnowledgeBaseStream:
         self.argsDict = argsDict
         self.sessions = {}
 
-        self.sessions_lock = threading.Lock()  # For adding/removing sessions
-        self.session_locks = {}  # Per-session locks; if we use self.session_locks AND self.generating_gpu_lock it MUST be in that order!
+        # ---------------------------------------------------------------------------------------- Locking, in one place
+        #
+        # There are four kinds of lock here, and they must always be acquired in this order. Acquiring them in any other
+        # order between two threads is how you deadlock a server:
+        #
+        #   1. self.sessions_lock        - guards the STRUCTURE of self.sessions / self.session_locks (which sessions
+        #                                  exist). Held only for the handful of instructions it takes to look something
+        #                                  up or swap it out; never held across model work or across a session lock.
+        #   2. self.session_locks[id]    - guards the CONTENTS of one session's dictionary. Held for the length of one
+        #                                  request, which can be tens of seconds.
+        #   3. self.generating_gpu_lock  - guards self.llm_generator. One generation at a time, machine wide.
+        #   4. self.embedding_gpu_lock   - guards self.llm_embedder.
+        #
+        # The two GPU locks are separate rather than one lock so that a request embedding its result does not block an
+        # unrelated request that is generating. Nothing currently holds both at once except cleanup(), which is why the
+        # order between them (3 before 4) is only stated here rather than being load bearing anywhere else.
+        self.sessions_lock = threading.Lock()
+        self.session_locks = {}
 
-        self.generating_gpu_lock = threading.Lock() # if we use self.sessions_lock AND self.generating_gpu_lock it MUST be in that order!
+        self.generating_gpu_lock = threading.Lock()
         self.embedding_gpu_lock = threading.Lock()
+
+        # Flipped by cleanup() so that a request arriving during shutdown is refused rather than handed a model that is
+        # in the middle of being freed. Guarded by the two GPU locks.
+        self.models_released = False
 
         self.model_type = self.argsDict['model_type']
 
@@ -71,13 +95,21 @@ class KnowledgeBaseStream:
             logger.error(f"{ColoredText.RED_TEXT}KnowledgeBase: The knowledge base file [{self.argsDict['knowledge_base_file']}] was empty - exiting.{ColoredText.END_TEXT}")
             sys.exit(0)
 
+        # Work out which card each model goes on. The embedding model is tiny, so it is always pinned to the single
+        # nominated GPU even when the generative model is being spread across all of them - splitting a 100 MB model
+        # would buy nothing and would put its tensors on a card the generator wants for its own layers.
+        gpu_index = self.argsDict.get('gpu', LlamaUtils.GPU_INDEX)
+        embedder_gpu_kwargs = LlamaUtils.build_gpu_kwargs(gpu_index, False, 'embedding', logger.info)
+        generator_gpu_kwargs = LlamaUtils.build_gpu_kwargs(gpu_index, self.argsDict.get('split_gpus', False), 'generative', logger.info)
+
         # Initialize the EMBEDDING model
         self.llm_embedder = Llama(
             model_path=self.argsDict['embedding_model'],
             n_gpu_layers=self.argsDict['embedding_gpu_layers'],
             embedding=True,  # ESSENTIAL for embedding models
             verbose=self.argsDict['debug'],
-            n_ctx=self.argsDict['embedding_max_context_tokens'] # Embedding models don't need huge context for individual texts, but set a reasonable one
+            n_ctx=self.argsDict['embedding_max_context_tokens'], # Embedding models don't need huge context for individual texts, but set a reasonable one
+            **embedder_gpu_kwargs
         )
 
         logger.info(f"{ColoredText.GREEN_TEXT}RolePlayStream: Embedding model [{self.argsDict['embedding_model']}] loaded with [{self.argsDict['embedding_gpu_layers']}] GPU layers and a context size of [{self.argsDict['embedding_max_context_tokens']}].{ColoredText.END_TEXT}")
@@ -93,11 +125,16 @@ class KnowledgeBaseStream:
             # chat_handler is often useful for proper prompt formatting with chat models,
             # but has been removed for compatibility. Ensure your generative model
             # is fine-tuned for conversational input without explicit chat handler.
+            **generator_gpu_kwargs
         )
         logger.info(f"{ColoredText.GREEN_TEXT}RolePlay: Generative text model [{self.argsDict['generating_model']}] loaded with [{self.argsDict['generating_gpu_layers']}] GPU layers and a context size of [{self.argsDict['generating_max_context_tokens']}].{ColoredText.END_TEXT}")
 
-        # Get the system tokens
-        self.system_tokens = (LlamaUtils.universal_token_count(self.llm_generator, "system", self.argsDict['system_message'], self.model_type))
+        # Get the system tokens. This runs during construction, before the server has started and therefore before any
+        # other thread exists, so it is the one place the generator is touched without generating_gpu_lock held. Taking
+        # the lock here anyway keeps the rule 'never touch llm_generator unlocked' true without exception, which is
+        # cheaper to maintain than an exception everyone has to remember.
+        with self.generating_gpu_lock:
+            self.system_tokens = (LlamaUtils.universal_token_count(self.llm_generator, "system", self.argsDict['system_message'], self.model_type))
 
         self.max_useable_tokens = (1 - self.argsDict['buffer_context_pcnt']) * self.argsDict['generating_max_context_tokens']  # shave a bit off the top to accommodate the buffer
 
@@ -143,6 +180,28 @@ class KnowledgeBaseStream:
         with self.sessions_lock:
             return self.sessions.get(session_id)
 
+    def get_session_and_lock(self, session_id):
+        """
+        Looks up a session AND the lock that guards it, as a single atomic step.
+
+        This exists because fetching the two separately is a race: a caller that gets the session, and only then reaches
+        for self.session_locks[session_id], can have remove_session delete the lock in between and take a KeyError to
+        the face. Since the pair is returned under one acquisition of sessions_lock, the caller always ends up with a
+        lock object that genuinely belongs to the session it was handed - even if the session is torn down a moment
+        later, in which case the caller simply does its work against a dictionary nobody will read again.
+
+        Args:
+            session_id: The session to look up.
+
+        Returns:
+            tuple: (session_dict, session_lock), or (None, None) if there is no such session.
+        """
+        with self.sessions_lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                return None, None
+            return session, self.session_locks[session_id]
+
     def remove_session(self, session_id):
         """
         When used with AmadeoServer, set this to 'additional_shutdown' so it will run when the socket is closed. If not using AmadeoServer, run this at the end of the session.
@@ -153,14 +212,24 @@ class KnowledgeBaseStream:
         Returns:
 
         """
-        # Use main lock when modifying STRUCTURE (removing sessions/locks)
         logger.info(f"{ColoredText.BLUE_TEXT}session_id {session_id} ended - removing from dictionary.{ColoredText.END_TEXT}")
+
+        # Detach the session from the structure first, holding sessions_lock only for the pop itself. Once it is out of
+        # both dictionaries no new request can find it, so there is nothing to be gained by continuing to hold the
+        # structure lock - and a great deal to lose: the wait below can easily run to tens of seconds if the user
+        # disconnected mid-generation, and holding sessions_lock across that wait would stall every OTHER user's request
+        # dispatch behind this one disconnect.
         with self.sessions_lock:
-            if session_id in self.sessions:
-                # Acquire session lock before deleting to ensure no one is using it
-                with self.session_locks[session_id]:
-                    del self.sessions[session_id]
-                del self.session_locks[session_id]
+            session = self.sessions.pop(session_id, None)
+            session_lock = self.session_locks.pop(session_id, None)
+
+        if session_lock is None:
+            return  # never existed, or a second shutdown for the same session - either way there is nothing to wait on
+
+        # A request that grabbed this session before the pop is still working on it. Wait for it to finish so that we do
+        # not return - and let the caller tear the connection down - while a generation is still writing to the session.
+        with session_lock:
+            pass
 
 
     def handle_client_request(self, request: Dict[str, Any], data:bytes = None):
@@ -272,8 +341,10 @@ class KnowledgeBaseStream:
 
         logger.info(f"{ColoredText.BLUE_TEXT}Handling request from session_id '{session_id}'.{ColoredText.END_TEXT}")
 
-        # mySessionDict requires the use of self.session_locks[session_id] - we are CONSTANTLY using things from this dictionary here, so just lock the whole thing
-        mySessionDict = self.get_session(session_id)
+        # mySessionDict requires the use of its session lock - we are CONSTANTLY using things from this dictionary here,
+        # so just lock the whole thing. The dictionary and its lock are fetched together, in one acquisition of
+        # sessions_lock, because fetching them separately races with remove_session - see get_session_and_lock.
+        mySessionDict, session_lock = self.get_session_and_lock(session_id)
 
         # If the session_id was not found, immediately exit
         if not mySessionDict:
@@ -287,8 +358,21 @@ class KnowledgeBaseStream:
             }
             return response
 
+        # Cheap early bail during shutdown, so a request arriving after cleanup() does not grind through history
+        # assembly and vector searches only to be refused at the generation step. This read is deliberately unlocked -
+        # it is an optimisation, not the guard; the load bearing check is inside generating_gpu_lock further down.
+        if self.models_released:
+            return {
+                'success': False,
+                'type': 'error',
+                "response": '',
+                "message": "The server is shutting down and the models have been released.",
+                "elapsed_time": time.time() - start_time,
+                'file_size': 0
+            }
+
         # The lock is really for mySessionDict
-        with (self.session_locks[session_id]):
+        with (session_lock):
             logger.info(f"Request received for session_id {mySessionDict['session_id']} - processing.")
 
             # Immediately check and see if thee are fatal errors
@@ -456,6 +540,11 @@ class KnowledgeBaseStream:
                     logger.info(f"{ColoredText.BLUE_TEXT}Sending to the LLM generator for session_id {mySessionDict['session_id']} ... used_tokens: {used_tokens} generating_max_context_tokens: {self.argsDict['generating_max_context_tokens']} used_max_response_tokens: {self.argsDict['max_response_tokens']}{ColoredText.END_TEXT}")
 
                     with self.generating_gpu_lock:
+                        # Checked INSIDE the lock: cleanup() sets this while holding the same lock, so a request that
+                        # was queued behind a shutdown finds it set here rather than calling into a freed model.
+                        if self.models_released:
+                            raise RuntimeError("the models have been released - the server is shutting down")
+
                         llama_response = self.llm_generator.create_chat_completion(
                             messages=messages_for_llm,
                             max_tokens=self.argsDict['max_response_tokens'],
@@ -649,14 +738,32 @@ class KnowledgeBaseStream:
         """
         Releases LLMs from memory. Call this right before shutdown.
 
+        Both GPU locks are taken so that this cannot free a model out from under a request that is mid-generation or
+        mid-embedding; the locks are acquired in the documented order (generating, then embedding - see __init__) and
+        held across the whole release. 'models_released' is set while they are still held, so any request that was
+        waiting on a lock finds the flag set the moment it gets in and bails out instead of calling into a freed model.
+
+        This does NOT tear down live sessions - AmadeoServer calls remove_session for each of those as its connections
+        close. Sessions still holding a VectorDB that references these models will fail if used after this point, which
+        is why this belongs at shutdown and nowhere else.
+
         Returns:
 
         """
 
-        del self.llm_embedder
-        del self.llm_generator
+        with self.generating_gpu_lock:
+            with self.embedding_gpu_lock:
+                if self.models_released:
+                    return  # already cleaned up; a second call must not del a second time
 
-        gc.collect()  # Force garbage collection
+                self.models_released = True
+
+                del self.llm_embedder
+                del self.llm_generator
+
+                gc.collect()  # Force garbage collection
+
+        logger.info(f"{ColoredText.BLUE_TEXT}KnowledgeBaseStream.cleanup: Generative and embedding models released.{ColoredText.END_TEXT}")
 
 
     @staticmethod
@@ -675,254 +782,17 @@ class KnowledgeBaseStream:
     @staticmethod
     def get_args_dict() -> dict:
         """
-        Gets args dictionary for a traditional vector database, meant to save the conversation for later.
+        Gets the args dictionary for the knowledge base server.
 
-        :param log_func:
-        :return:
+        This is a thin wrapper around LlamaUtils.get_args_dict_knowledge_base_server - every entry point in this tree
+        shares one set of argument definitions and one set of config loaders, so that adding a setting (or fixing the
+        help text on one) only has to happen in a single place. All this class contributes is its own default bind
+        address, which it owns because the two servers must not default to the same port.
+
+        Note that the knowledge base half of this is shared verbatim with the interactive knowledge base script, so a
+        single knowledge base JSON drives both.
+
+        :return: The merged dictionary of system, knowledge base, and server settings, plus the loaded 'system_message'. Empty if argument parsing failed or '--help' was used.
         """
 
-        parser = argparse.ArgumentParser(description='Run a LLM, as you see fit.')
-        parser.add_argument("-ho", "--host", default=KnowledgeBaseStream.HOST, help="The hostname/IP that the server will bind to.")
-        parser.add_argument("-p", "--port", type=int, default=KnowledgeBaseStream.PORT, help="The port that the server will listen on for requests.")
-
-        parser.add_argument("-bmd", "--base-model-dir", default=SubjectiveConstants.BASE_MODEL_DIR,help="The location of the base model that will generate text.")
-        parser.add_argument("-bed", "--base-embedding-dir", default=SubjectiveConstants.BASE_EMBEDDING_DIR,help="The location of the embedding model.")
-        parser.add_argument("-m", "--model", default=SubjectiveConstants.MODEL,help="The filename of your text generation model. Please, just the filename, not the directory.")
-        parser.add_argument("-mt", "--model-type", default=LlamaUtils.MODEL_TYPE,help="The model type: ['llama-2', 'llama-3', 'alpaca', 'qwen', 'command-r', 'vicuna', 'oasst_llama', 'baichuan-2', 'baichuan', 'openbuddy', 'redpajama-incite', 'snoozy', 'phind', 'intel', 'open-orca', 'mistrallite', 'zephyr', 'pygmalion', 'chatml', 'mistral-instruct', 'chatglm3', 'openchat', 'saiga', 'gemma', 'functionary', 'functionary-v2', 'functionary-v1', 'chatml-function-calling'].")
-        parser.add_argument("-cf", "--chat-format", default=LlamaUtils.CHAT_FORMAT,help="The chat format type; you should usually leave this None and let the system figure it out (with the exception of 'command-r' - in that case, use 'llama-3'). Values: ['llama-2', 'llama-3', 'alpaca', 'qwen', 'vicuna', 'oasst_llama', 'baichuan-2', 'baichuan', 'openbuddy', 'redpajama-incite', 'snoozy', 'phind', 'intel', 'open-orca', 'mistrallite', 'zephyr', 'pygmalion', 'chatml', 'mistral-instruct', 'chatglm3', 'openchat', 'saiga', 'gemma', 'functionary', 'functionary-v2', 'functionary-v1', 'chatml-function-calling'].")
-        parser.add_argument("-em", "--embedding-model", default=SubjectiveConstants.EMBEDDING_MODEL,help="The filename of your embedding model. Please, just the filename, not the directory.")
-
-        parser.add_argument("-kbf", "--knowledge-base-file", type=str, default="", help="The JSON Lines (JSONL) file that contains your knowledge base. This must be in JSONL format - a list of dictionaries with fields 'id', 'question', and 'answer'.")
-        parser.add_argument("-spf", "--system-prompt-file", default=SubjectiveConstants.SYSTEM_PROMPT_FILE,help="A filename (full, absolute path to the file) that contains your system prompt; this is a text file. This is the initial message you send to the LLM to 'set the tone' of the entire conversation. This is critical! Be creative!")
-
-        parser.add_argument("-gl", "--gpu-layers", type=int, default=LlamaUtils.GPU_LAYERS,help="How many GPU layers do you want for the text generator model? -1 means try to get them all, but be warned: if the GPU layers are too high, the model will not fit in VRAM this will fail. This number is usually between 10 and 70, IF -1 does not work.")
-        parser.add_argument("-egl", "--embedding-gpu-layers", type=int, default=LlamaUtils.EMBEDDING_GPU_LAYERS,help="Similar to --gpu-layers but for the embedding model (see that description). You will usually want -1 for this. If -1 doesn't work, you can try some value between 10 and 100, but if -1 doesnt work, you probably have much bigger problems as embedding models are very small.")
-        parser.add_argument("-mct", "--max-context-tokens", type=int, default=LlamaUtils.MAX_CTX,help="Known as 'n_ctx' in the llama binary, this is the max token count for the entire conversation, including vector database retrieval, chat history, current prompt, and LLM response. This should usually be a power of 2, and common choices are 512, 2048, 4096, or 8192, but it can go higher. Llama 3 models typically have n_ctx of 8192 or more. Just know that the space this tames is n_ctx^2 and it does count against your VRAM.")
-        parser.add_argument("-emct", "--embedding-max-context-tokens", type=int, default=LlamaUtils.EMBEDDING_MAX_CTX,help="Similar to '--max-context-tokens' (see that description), but for the embedding model. This does not have to be too big as it only has to accommodate either one request or response; 512 is usually more than enough for this.")
-        parser.add_argument("-mrt", "--max-response-tokens", type=int, default=LlamaUtils.MAX_RESPONSE_TOKENS,help="The maximum number of response tokens the LLM will use in its response.")
-
-        parser.add_argument("-rpt", "--repeat-penalty", type=float, default=LlamaUtils.REPEAT_PENALITY,help="A number starting from 1; this is a penality for the LLM to repeat phrases. 1.1 to 1.3 works well; 1.5+ starts making things weird and incoherent.")
-
-        parser.add_argument("-mvdbp", "--max-vector-database-pcnt", type=float, default=LlamaUtils.MAX_VECTOR_DB_PCNT,help="A number from 0 to 1; it represents the percentage of the share of the overall chat history that is occupied by items from the vector database. Note that if the entire chat history fits into max-context-tokens (n_ctx) the vector database will not be used ")
-        parser.add_argument("-bcp", "--buffer-context-pcnt", type=float, default=LlamaUtils.BUFFER_CTX_PCNT,help="A number from 0 to 1; it represents the percentage of the share of the overall context tokens we want to use as a 'buffer'; since We cant fully guess the number of tokens in the chat history we send to the LLM, we approximate as best we can. This number is a buffer to help ensure that we do not hit this limit, as the LLM WILL fail if we do.")
-
-        parser.add_argument("-tk", "--top-k", type=int, default=LlamaUtils.TOP_K, help="The number of results returned by the vector database 'search'.")
-        parser.add_argument("-mvdbs", "--min-vector-db-score", type=float, default=LlamaUtils.MIN_VECTOR_DB_SCORE, help="Every match from the vector database has a confidence score from 0 to 1; this indicates the minimum score you wish to have in the results from the vector database.")
-
-        parser.add_argument("-d", "--debug", action='store_true',help="Do you want to see some additional log lines while using the LLM?")
-        parser.add_argument("-j", "--json", type=str, default="", help="If this points to a valid JSON file, the ENTIRE parameter settings are pulled from that file, and the defaults - and other arguments passed from the command line - are ignored. If the JSON load fails for whatever reason, though, the defaults WILL be engaged.")
-
-        argDict = {}
-
-        try:
-            args = parser.parse_args()
-            use_default_arg_config = True  # This is only flipped if we successfully load from a JSON file
-
-            json_config_file = args.json
-
-            if json_config_file and os.path.exists(json_config_file):
-                try:
-                    config_dict = KnowledgeBaseStream.load_json_config(json_config_file)
-
-                    argDict['host'] = config_dict['host']
-                    argDict['port'] = config_dict['port']
-
-                    argDict['generating_model'] = os.path.join(config_dict['base_model_dir'], config_dict['model'])
-                    argDict['embedding_model'] = os.path.join(config_dict['base_embedding_dir'], config_dict['embedding_model'])
-
-                    argDict['knowledge_base_file'] = config_dict['knowledge_base_file']
-                    argDict['system_prompt_file'] = config_dict['system_prompt_file']
-
-                    argDict['generating_gpu_layers'] = config_dict['gpu_layers']
-                    argDict['embedding_gpu_layers'] = config_dict['embedding_gpu_layers']
-                    argDict['generating_max_context_tokens'] = config_dict['max_context_tokens']
-                    argDict['embedding_max_context_tokens'] = config_dict['embedding_max_context_tokens']
-                    argDict['max_response_tokens'] = config_dict['max_response_tokens']  # Maximum tokens the generative model is allowed to generate
-
-                    argDict['repeat_penalty'] = config_dict['repeat_penalty']
-
-                    argDict['max_vector_database_pcnt'] = config_dict['max_vector_database_pcnt']
-                    argDict['buffer_context_pcnt'] = config_dict['buffer_context_pcnt']
-
-                    argDict['top_k'] = config_dict['top_k']
-                    argDict['min_vector_db_score'] = config_dict['min_vector_db_score']
-
-                    argDict['model_type'] = config_dict.get('model_type', LlamaUtils.MODEL_TYPE)
-                    argDict['chat_format'] = config_dict.get('chat_format', LlamaUtils.CHAT_FORMAT)
-                    argDict['debug'] = config_dict.get('debug', False)
-
-                    logger.info(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_args_dict: Config loaded from JSON file {json_config_file}; system prompt file is '{argDict['system_prompt_file']}'.{ColoredText.END_TEXT}")
-                    use_default_arg_config = False
-
-
-                except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError) as e:
-                    logger.error(f"{ColoredText.RED_TEXT}LlamaUtils.get_args_dict: Could not load JSON config [{json_config_file}] - there are errors. Will attempt to load other defaults or args. Error: {e}.{ColoredText.END_TEXT}")
-
-
-            elif json_config_file:
-                logger.warning(f"{ColoredText.RED_TEXT}LlamaUtils.get_args_dict: Could not load JSON config [{json_config_file}] - file does not exist. Loading from defaults or other parameters sent.{ColoredText.END_TEXT}")
-
-            if use_default_arg_config:
-
-                argDict['host'] = args.host
-                argDict['port'] = args.port
-
-                argDict['generating_model'] = os.path.join(args.base_model_dir, args.model)
-                argDict['embedding_model'] = os.path.join(args.base_embedding_dir, args.embedding_model)
-
-                argDict['knowledge_base_file'] = args.knowledge_base_file
-
-                argDict['system_prompt_file'] = args.system_prompt_file
-
-                argDict['generating_gpu_layers'] = args.gpu_layers
-                argDict['embedding_gpu_layers'] = args.embedding_gpu_layers
-                argDict['generating_max_context_tokens'] = args.max_context_tokens
-                argDict['embedding_max_context_tokens'] = args.embedding_max_context_tokens
-                argDict['max_response_tokens'] = args.max_response_tokens  # Maximum tokens the generative model is allowed to generate
-
-                argDict['repeat_penalty'] = args.repeat_penalty
-
-                argDict['max_vector_database_pcnt'] = args.max_vector_database_pcnt
-                argDict['buffer_context_pcnt'] = args.buffer_context_pcnt
-
-                argDict['top_k'] = args.top_k
-                argDict['min_vector_db_score'] = args.min_vector_db_score
-
-                argDict['debug'] = args.debug
-                argDict['model_type'] = args.model_type
-                argDict['chat_format'] = args.chat_format
-
-                logger.info(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_args_dict: Config loaded from args / defaults; system prompt file is '{argDict['system_prompt_file']}'.{ColoredText.END_TEXT}")
-
-            argDict['system_message'] = LlamaUtils.get_system_message(argDict['system_prompt_file'])
-
-        except SystemExit as e:
-            argDict = {}
-            if e.code == 0:
-                # --help was used, so print no error
-                print(f"{ColoredText.BLUE_TEXT}Thank you!{ColoredText.END_TEXT}")
-            else:
-                logger.error(f"{ColoredText.RED_TEXT}LlamaUtils.get_args_dict: Invalid arguments.{ColoredText.END_TEXT}")
-
-        return argDict
-
-
-    @staticmethod
-    def load_json_config(filepath: str) -> dict:
-        """
-        Loads a JSON file and scrapes specific entries into a dictionary.
-
-        Args:
-            filepath (str): The path to the JSON file.
-
-        Returns:
-            dict: A dictionary containing the scraped configuration fields. All fields are required. An example of a JSON doc:
-            {
-
-                "host": "127.0.0.1",
-                "port": 65440,
-
-                "base_model_dir": "/home/kevin/ai/models/llama.cpp",
-                "base_embedding_dir": "/home/kevin/ai/models/llama.cpp/embedding_models",
-                "model": "llama-3-70b.Q4_K_M.gguf",
-                "model_type": "Llama3",
-                "embedding_model": "nomic-embed-text-v1.5.Q5_K_M.gguf",
-
-                "knowledge_base_file": "/home/kevin/ai/knowledge_base.jsonl",
-                "system_prompt_file": "/home/kevin/ai/system_prompt.txt",
-
-                "gpu_layers": 57,
-                "embedding_gpu_layers": -1,
-                "max_context_tokens": 4096,
-                "embedding_max_context_tokens": 512,
-                "max_response_tokens": 512,
-
-                "repeat_penalty": 1.1,
-
-                "max_vector_database_pcnt": 0.2,
-                "buffer_context_pcnt": 0.05,
-
-                "top_k": 4,
-                "min_vector_db_score": 0.46,
-
-                "debug": false
-            }
-
-        Raises:
-            FileNotFoundError: If the specified file does not exist.
-            json.JSONDecodeError: If the file content is not valid JSON.
-            KeyError: If any of the required fields are missing from the JSON.
-            TypeError: If a field's value is not of the expected type.
-        """
-        required_fields = {
-            'host': str,
-            'port': int,
-
-            'base_model_dir': str,
-            'base_embedding_dir': str,
-            'model': str,
-            'embedding_model': str,
-
-            'knowledge_base_file': str,
-            "system_prompt_file": str,
-
-            'gpu_layers': int,
-            'embedding_gpu_layers': int,
-            'max_context_tokens': int,
-            'embedding_max_context_tokens': int,
-            'max_response_tokens': int,
-
-            'repeat_penalty': float,
-
-            'max_vector_database_pcnt': float,
-            'buffer_context_pcnt': float,
-
-            'top_k': int,
-            'min_vector_db_score': float
-        }
-
-        # Add optional fields with their types
-        optional_fields = {
-            'model_type': str,
-            'chat_format': Optional[str],
-            'debug': bool
-        }
-
-        if not os.path.exists(filepath):
-            raise FileNotFoundError(f"Error: The file '{filepath}' was not found.")
-
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        except json.JSONDecodeError as e:
-            raise json.JSONDecodeError(f"Error: Invalid JSON format in '{filepath}': {e}", e.doc, e.pos)
-        except Exception as e:
-            # Catch other potential file reading errors
-            raise IOError(f"Error reading file '{filepath}': {e}")
-
-        scraped_data = {}
-        # Process required fields (your existing code)
-        for field, expected_type in required_fields.items():
-            if field not in data:
-                raise KeyError(f"Error: Required field '{field}' missing from JSON in '{filepath}'.")
-
-            value = data[field]
-            if not isinstance(value, expected_type):
-                raise TypeError(
-                    f"Error: Field '{field}' in '{filepath}' has unexpected type "
-                    f"'{type(value).__name__}', expected '{expected_type.__name__}'."
-                )
-            scraped_data[field] = value
-
-        # Process optional fields (new code)
-        for field, expected_type in optional_fields.items():
-            if field in data:  # Only process if present
-                value = data[field]
-                if not isinstance(value, expected_type):
-                    raise TypeError(
-                        f"Error: Optional field '{field}' in '{filepath}' has unexpected type "
-                        f"'{type(value).__name__}', expected '{expected_type.__name__}'."
-                    )
-                scraped_data[field] = value
-
-        return scraped_data
+        return LlamaUtils.get_args_dict_knowledge_base_server(KnowledgeBaseStream.HOST, KnowledgeBaseStream.PORT, logger.info)

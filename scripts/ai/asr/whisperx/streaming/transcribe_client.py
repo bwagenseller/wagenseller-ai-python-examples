@@ -9,8 +9,18 @@ from amadeo_utils.client.amadeo_client import AmadeoClient
 from amadeo_utils.media_utils.audio_devices import prefer_pulse_defaults
 import logging
 
-# Configure logging to show timestamps and log levels
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
+# The two log layouts the client can use. The diagnostic one names the function and line that
+# emitted the record along with the log level, which is useful when working on the client itself;
+# the plain one keeps only the timestamp, so a transcription session reads as a transcript rather
+# than a log.
+# These are module level rather than class attributes because basicConfig below runs at import,
+# before the class exists.
+DIAGNOSTIC_LOG_FORMAT = '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+PLAIN_LOG_FORMAT = '%(asctime)s - %(message)s'
+
+# Configure logging to show timestamps and log levels. This runs before the command line has been
+# parsed, so it starts out diagnostic; configure_logging() switches it once --diagnostics is known.
+logging.basicConfig(level=logging.INFO, format=DIAGNOSTIC_LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 class WhisperXClient:
@@ -56,7 +66,10 @@ class WhisperXClient:
                     avg_word_conf = response.get("average_word_confidence", 0.0)
 
                     if transcription and transcription.strip():
-                        logger.info(f"(language: {detected_language} ({lang_conf:.2f})) (word conf: {avg_word_conf:.2f}): {transcription}")
+                        if self.args_dict.get('diagnostics'):
+                            logger.info(f"(language: {detected_language} ({lang_conf:.2f})) (word conf: {avg_word_conf:.2f}): {transcription}")
+                        else:
+                            logger.info(transcription)
 
             else:
                 # Handle different error/status types
@@ -171,7 +184,36 @@ class WhisperXClient:
                 self.graceful_shutdown()
 
     """
-    Gets args dictionary for a generic WhisperX streaming client  
+    Applies the chosen log layout to every handler the root logger already has
+    """
+    @staticmethod
+    def configure_logging(diagnostics: bool):
+        """
+        Switch the log layout to match the --diagnostics setting.
+
+        basicConfig has already installed a handler by the time the command line is parsed, and
+        calling it a second time is a no-op once handlers exist, so the formatter is replaced on
+        the existing handlers instead.
+
+        Args:
+            diagnostics: True to keep the log level, function name and line number in every record,
+                         False for the plain timestamp-only layout.
+
+        Returns:
+            None
+        """
+        formatter = logging.Formatter(DIAGNOSTIC_LOG_FORMAT if diagnostics else PLAIN_LOG_FORMAT)
+
+        for handler in logging.getLogger().handlers:
+            handler.setFormatter(formatter)
+
+        # Say so when the extra detail is being withheld, so that its absence looks like a setting
+        # rather than something missing.
+        if not diagnostics:
+            logger.info(f"{ColoredText.BLUE_TEXT}Diagnostics off - run with --diagnostics to see the detected language and confidence scores.{ColoredText.END_TEXT}")
+
+    """
+    Gets args dictionary for a generic WhisperX streaming client
     """
     @staticmethod
     def get_args_dict_streaming_client() -> dict:
@@ -182,6 +224,7 @@ class WhisperXClient:
         parser.add_argument("-vfd", "--vad_frame_duration", type=int, default=WhisperXClient.VAD_FRAME_DURATION_MS,help="The VAD frame duration, in milliseconds.")
         parser.add_argument("-va", "--vad_aggressiveness", type=int, default=WhisperXClient.VAD_AGGRESSIVENESS,help="The VAD aggressiveness, from 1 to 3. 3 = block most non-human speech, 1 = be a bit more permissive.")
         parser.add_argument("-sd", "--silence_duration", type=int, default=WhisperXClient.SILENCE_DURATION_TO_END_BUFFER_MS,help="The number of milliseconds that must pass that will denote an end to speech (and the beginning of processing the speech segment).")
+        parser.add_argument("-d", "--diagnostics", action="store_true",help="Show diagnostic detail alongside each transcription: the function and line that logged it, plus the detected language and its confidence and the average word confidence. Off by default, which prints just the timestamp and the transcription itself.")
 
         argDict = {}
 
@@ -194,6 +237,7 @@ class WhisperXClient:
             argDict['vad_frame_duration'] = args.vad_frame_duration
             argDict['vad_aggressiveness'] = args.vad_aggressiveness
             argDict['silence_duration'] = args.silence_duration
+            argDict['diagnostics'] = args.diagnostics
 
             logger.debug(f"{ColoredText.BLUE_TEXT}WhisperXUtils.get_args_dict_client: Config loaded; host: {argDict['host']} port: {argDict['port']}.{ColoredText.END_TEXT}")
 
@@ -209,5 +253,6 @@ class WhisperXClient:
 
 if __name__ == "__main__":
     argsDict = WhisperXClient.get_args_dict_streaming_client()
+    WhisperXClient.configure_logging(argsDict.get('diagnostics', False))
     client = WhisperXClient(argsDict)
     client.run_client()

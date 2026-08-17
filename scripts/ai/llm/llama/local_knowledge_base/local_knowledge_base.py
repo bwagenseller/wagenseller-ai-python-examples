@@ -1,9 +1,15 @@
 import numpy as np
 import os
 import sys
-from llama_cpp import Llama
-from amadeo_utils.ai.llm.vector_database.VectorDB import VectorDB
+
+# IMPORTANT: llama_utils MUST be imported before llama_cpp. Importing llama_cpp loads the llama.cpp shared library,
+# which registers its GGML CUDA backend and pins the device ordering for the life of the process; llama_utils sets
+# CUDA_DEVICE_ORDER at import time so that '--gpu N' means the Nth card as 'nvidia-smi -L' lists it. Flip these two
+# lines and the GPU selection silently reverts to CUDA's own 'fastest first' ordering.
 from amadeo_utils.ai.llm.llama.llama_utils import LlamaUtils
+from llama_cpp import Llama
+
+from amadeo_utils.ai.llm.vector_database.VectorDB import VectorDB
 from amadeo_utils.colored_text import ColoredText
 import json
 import gc
@@ -75,6 +81,13 @@ class KnowledgeBase:
             sys.exit(0)
 
 
+        # Work out which card each model goes on. The embedding model is tiny, so it is always pinned to the single
+        # nominated GPU even when the generative model is being spread across all of them - splitting a 100 MB model
+        # would buy nothing and would put its tensors on a card the generator wants for its own layers.
+        gpu_index = self.argsDict.get('gpu', LlamaUtils.GPU_INDEX)
+        embedder_gpu_kwargs = LlamaUtils.build_gpu_kwargs(gpu_index, False, 'embedding')
+        generator_gpu_kwargs = LlamaUtils.build_gpu_kwargs(gpu_index, self.argsDict.get('split_gpus', False), 'generative')
+
         # try
         # Initialize the EMBEDDING model
         self.llm_embedder = Llama(
@@ -82,7 +95,8 @@ class KnowledgeBase:
             n_gpu_layers=self.argsDict['embedding_gpu_layers'],
             embedding=True,  # ESSENTIAL for embedding models
             verbose=self.argsDict['debug'],
-            n_ctx=self.argsDict['embedding_max_context_tokens'] # Embedding models don't need huge context for individual texts, but set a reasonable one
+            n_ctx=self.argsDict['embedding_max_context_tokens'], # Embedding models don't need huge context for individual texts, but set a reasonable one
+            **embedder_gpu_kwargs
         )
 
         print(f"{ColoredText.GREEN_TEXT}KnowledgeBase: Embedding model [{self.argsDict['embedding_model']}] loaded with [{self.argsDict['embedding_gpu_layers']}] GPU layers and a context size of [{self.argsDict['embedding_max_context_tokens']}].{ColoredText.END_TEXT}")
@@ -98,6 +112,7 @@ class KnowledgeBase:
             # chat_handler is often useful for proper prompt formatting with chat models,
             # but has been removed for compatibility. Ensure your generative model
             # is fine-tuned for conversational input without explicit chat handler.
+            **generator_gpu_kwargs
         )
         print(f"{ColoredText.GREEN_TEXT}KnowledgeBase: Generative text model [{self.argsDict['generating_model']}] loaded with [{self.argsDict['generating_gpu_layers']}] GPU layers and a context size of [{self.argsDict['generating_max_context_tokens']}].{ColoredText.END_TEXT}")
 
