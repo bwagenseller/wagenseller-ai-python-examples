@@ -20,6 +20,21 @@ Note the 'default' - you need a default. After that, the world is your oyster. A
 
 """
 
+import os
+
+# CUDA numbers GPUs by 'FASTEST_FIRST' unless told otherwise, which ranks them by compute
+# capability rather than by the slot they sit in - so CUDA's device 0 is not necessarily the
+# device 0 that 'nvidia-smi' reports. On a mixed pair such as an RTX 3090 (sm_86) alongside an
+# RTX 4070 Ti (sm_89), CUDA puts the newer-architecture 4070 Ti first even though nvidia-smi
+# lists the 3090 first, so '--gpu 0' would silently pick the opposite card to the one the user
+# was looking at. 'PCI_BUS_ID' orders by physical slot, which is what nvidia-smi shows and what
+# anyone reading '--gpu 0' will expect.
+#
+# This has to be set before CUDA is initialised, hence before torch (or f5_tts, which imports
+# torch itself) is imported rather than in the constructor. setdefault is used so that an
+# explicit setting in the environment still wins.
+os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+
 import torch
 from pathlib import Path
 from f5_tts.api import F5TTS
@@ -28,7 +43,9 @@ import logging
 import json
 from typing import Dict, Tuple, Any
 import io
-import os
+import gc
+import inspect
+import threading
 import argparse
 import numpy as np # NumPy array library
 from amadeo_utils.ai.tts.generic_utils import PhoneticReplacement, SplitDialogue
@@ -55,6 +72,7 @@ class AmadeoF5:
     VOICE_MAPPING_FILE = ''
     PAUSE_DURATION = .4
     SEGMENT_SPACER_DURATION = .3
+    GPU_INDEX = 0
 
 
     def __init__(self, config_dict:Dict):
@@ -70,6 +88,60 @@ class AmadeoF5:
         self.segment_spacer_duration = self.config['segment_spacer_duration']
 
         self.voice_samples_dir = self.config['voices']
+
+        # ---------------------------------------------------------------------------- GPU selection
+        # Which physical GPU to run on. Absent from the dictionary (i.e. when this class is used
+        # outside of the server script) it falls back to the first GPU, which is the only index
+        # guaranteed to exist on a CUDA machine.
+        self.gpu_index = self.config.get('gpu', AmadeoF5.GPU_INDEX)
+
+        if torch.cuda.is_available():
+            device_count = torch.cuda.device_count()
+
+            # Fail at startup rather than quietly generating audio on the wrong card - a silent
+            # fallback would look identical to success while ignoring what was asked for.
+            if self.gpu_index < 0 or self.gpu_index >= device_count:
+                raise ValueError(f"Requested GPU index {self.gpu_index} does not exist; this machine has {device_count} CUDA device(s), so valid indexes are 0 through {device_count - 1}.")
+
+            # This class runs behind a threaded server, and torch tracks the 'current' device per
+            # thread rather than per process. Pinning it here only fixes the thread doing the
+            # loading; every worker thread has to pin it again before it touches the GPU (see
+            # _bind_thread_to_gpu), otherwise that thread would silently default back to GPU 0.
+            torch.cuda.set_device(self.gpu_index)
+
+            self.device = f"cuda:{self.gpu_index}"
+
+            logger.info(f"F5-TTS: Using GPU {self.gpu_index} ({torch.cuda.get_device_name(self.gpu_index)}) of {device_count} available.")
+        else:
+            # No CUDA at all - the GPU index is meaningless, so note that it is being ignored
+            # instead of letting the caller assume it took effect.
+            if self.gpu_index != AmadeoF5.GPU_INDEX:
+                logger.warning(f"A GPU index ({self.gpu_index}) was requested but no CUDA device is available; falling back to CPU and ignoring the index.")
+
+            # Reset the index so the rest of the class does not have to keep asking whether it is
+            # meaningful; on CPU it is simply unused.
+            self.gpu_index = AmadeoF5.GPU_INDEX
+            self.device = "cpu"
+
+        # Convenience flag - self.device is 'cuda:N' rather than a bare 'cuda', so string
+        # comparisons against "cuda" elsewhere would not hold.
+        self.use_cuda = self.device.startswith("cuda")
+
+        # ---------------------------------------------------------------------------- Locks
+        # AmadeoServer hands every client connection to its own thread, and its docstring is
+        # explicit that anything sharing a resource such as a GPU has to do its own locking. The
+        # F5-TTS model below is loaded once and shared by all of those threads, so:
+        #
+        #  * gpu_lock serialises the actual inference calls. It is taken per request rather than
+        #    per connection - a client holding a session open is not a reason to keep the GPU to
+        #    itself. Waiting is a plain block rather than a 'GPU busy' rejection: a handful of
+        #    household clients will not queue up long enough for that to be worth the extra
+        #    protocol.
+        #  * dialogue_lock guards the one-time voice confirmation pass, which mutates the shared
+        #    dialogue_helper. That is CPU work, so it gets its own lock rather than borrowing the
+        #    GPU one - two threads arriving together would otherwise race on the same dictionary.
+        self.gpu_lock = threading.Lock()
+        self.dialogue_lock = threading.Lock()
 
         # Determine if the phonetic replacement file exists - if it does, set the phonetic_replacement for replacements
         self.phonetic_replacement = None
@@ -87,20 +159,84 @@ class AmadeoF5:
         # This provides significant performance benefits for successive calls
         try:
 
-            if self.model_path:
-                logger.info(f"Loading Custom F5-TTS model {self.model_path}... (this may take a moment)")
-                self.tts_model = F5TTS(ckpt_file=self.model_path)  # Load the pre-trained F5-TTS model into memory
-            elif self.model:
-                logger.info(f"Loading F5-TTS model {self.model}... (this may take a moment)")
-                self.tts_model = F5TTS(model=self.model)  # Load the pre-trained F5-TTS model into memory
+            # F5TTS takes the device as a constructor keyword and holds onto it for every later
+            # infer() call, so it is the only place the card can be chosen. The keyword arrived
+            # after F5-TTS' first releases, though, so it is only passed if the installed version
+            # actually accepts it - on an older build the torch.cuda.set_device call above still
+            # steers it, because F5-TTS falls back to a bare 'cuda' and torch resolves that to
+            # whatever the calling thread's current device is.
+            if 'device' in inspect.signature(F5TTS.__init__).parameters:
+                device_kwargs = {'device': self.device}
             else:
-                logger.info("Loading F5-TTS model... (this may take a moment)")
-                self.tts_model = F5TTS()  # Load the pre-trained F5-TTS model into memory
+                device_kwargs = {}
+                logger.warning(f"This build of F5-TTS does not accept a 'device' argument; relying on the thread's current CUDA device ({self.device}) instead. Upgrade f5-tts if the model ends up on the wrong GPU.")
+
+            if self.model_path:
+                logger.info(f"Loading Custom F5-TTS model {self.model_path} on {self.device}... (this may take a moment)")
+                self.tts_model = F5TTS(ckpt_file=self.model_path, **device_kwargs)  # Load the pre-trained F5-TTS model into memory
+            elif self.model:
+                logger.info(f"Loading F5-TTS model {self.model} on {self.device}... (this may take a moment)")
+                self.tts_model = F5TTS(model=self.model, **device_kwargs)  # Load the pre-trained F5-TTS model into memory
+            else:
+                logger.info(f"Loading F5-TTS model on {self.device}... (this may take a moment)")
+                self.tts_model = F5TTS(**device_kwargs)  # Load the pre-trained F5-TTS model into memory
             logger.info("F5-TTS model loaded successfully - ready for requests")
         except Exception as e:
             # Other errors loading the model (GPU issues, model files missing, etc.)
             logger.error(f"Error loading F5-TTS: {e}")
             raise
+
+
+    def _bind_thread_to_gpu(self):
+        """
+        Pin the calling thread to the GPU this instance was configured for.
+
+        torch stores the 'current' CUDA device per thread, and it always starts out as device 0.
+        AmadeoServer hands every client connection to a fresh thread, so a thread that has not
+        been pinned would send any torch work that was given a bare 'cuda' device to GPU 0
+        regardless of what was asked for. On a single GPU machine that is invisible; on a multi
+        GPU machine it silently splits the work across cards. Calling this at the top of each GPU
+        bound request keeps every thread on the same card.
+
+        This is a no-op when running on CPU.
+
+        Returns:
+            None
+        """
+        if self.use_cuda:
+            torch.cuda.set_device(self.gpu_index)
+
+
+    def _confirm_dialogue_voices(self):
+        """
+        Resolve every mapped speaker name - and the narrator - to a voice that actually exists in
+        voices.json, once, on the first request that needs it.
+
+        This is only meaningful when 'use_different_speakers' is set. It rewrites the shared
+        dialogue_helper in place, which is why it is guarded: with a threaded server, two clients
+        arriving at the same time on a cold server would otherwise walk the same dictionary while
+        the other one was rewriting it. The flags are re-checked inside the lock so that the
+        second thread through does not redo the work the first one just finished.
+
+        This is pure configuration lookup - no GPU work - so it takes its own lock rather than the
+        GPU lock, and callers should run it before claiming the GPU.
+
+        Returns:
+            None
+        """
+        with self.dialogue_lock:
+            if not self.dialogue_helper.voice_mapping_list_confirmed:
+                # go through each name in the mapped list to get what F5-TTS calls this voice
+                for name in self.dialogue_helper.voice_mapping.keys():
+                    # get the dictionary based on the passed name, and ensure its in there (if not, use the default) it usually will be the same, if this was set up properly, but on the off chance it wasn't....
+                    one_character = self.dialogue_helper.voice_mapping[name]
+                    one_character['tts_name'] = self.get_voice_info(one_character['tts_name'])[0] #get just the first item in the tuple returned (we do not care about the rest)
+                self.dialogue_helper.voice_mapping_list_confirmed = True
+
+            # settle the narrator - either confirm the voice OR set to default if the narrator voice is missing or is not in the voice listing
+            if self.dialogue_helper.narrator and not self.dialogue_helper.narrator_confirmed:
+                self.dialogue_helper.narrator = self.get_voice_info(self.dialogue_helper.narrator)[0]
+                self.dialogue_helper.narrator_confirmed = True
 
 
     def load_voice_config(self):
@@ -269,14 +405,14 @@ class AmadeoF5:
             Exception: If speech generation fails for any reason
         """
 
+        # ------------------------------------------------------------------ CPU only work
+        # Nothing here touches the GPU, so it is deliberately done before the lock is taken -
+        # rewriting one client's text while another client is mid generation costs that client
+        # nothing.
+
         # Verify all speakers first, if it has not been done
-        if self.dialogue_helper.use_different_speakers and not self.dialogue_helper.voice_mapping_list_confirmed:
-            # go through each name in the mapped list to get what kokoro calls this voice
-            for name in self.dialogue_helper.voice_mapping.keys():
-                # get the dictionary based on the passed name, and ensure its in there (if not, use the default) it usually will be the same, if this was set up properly, but on the off chance it wasn't....
-                one_character = self.dialogue_helper.voice_mapping[name]
-                one_character['tts_name'] = self.get_voice_info(one_character['tts_name'])[0] #get just the first item in the tuple returned (we do not care about the rest)
-            self.dialogue_helper.voice_mapping_list_confirmed = True
+        if self.dialogue_helper.use_different_speakers:
+            self._confirm_dialogue_voices()
 
         # if the phonetic replacement object exists, replace the words in the text with what they sound like phonetically
         if self.phonetic_replacement:
@@ -287,76 +423,97 @@ class AmadeoF5:
 
         try:
 
-            raw_data = None
-            if not self.dialogue_helper.use_different_speakers:
-                # if we are not using multiple speakers, just run a single pass through F5-TTS
-                final_tensor, sample_rate = self.single_pass(text, voice_name)
+            # ------------------------------------------------------------------ GPU only work
+            # The lock is held for the F5-TTS calls and nothing else. The model is shared across
+            # every client thread and is not safe to call concurrently.
+            #
+            # For multi-speaker text the lock covers the whole segment loop rather than each
+            # single_pass: the segments of one line of dialogue belong together, and interleaving
+            # two clients' segments would just thrash the GPU for no gain in fairness.
+            with self.gpu_lock:
+                try:
+                    # Every server thread has to claim the configured GPU for itself; see
+                    # _bind_thread_to_gpu for why this is not just done once at startup.
+                    self._bind_thread_to_gpu()
 
-                # Handle numpy array vs torch tensor
-                # Different F5-TTS versions return different data types, but the version as of August 2025 is indeed a NumPy array
-                if isinstance(final_tensor, np.ndarray):
-                    final_tensor = torch.from_numpy(final_tensor).float()
-            else:
-                # if we ARE using multiple speakers
+                    if not self.dialogue_helper.use_different_speakers:
+                        # if we are not using multiple speakers, just run a single pass through F5-TTS
+                        final_tensor, sample_rate = self.single_pass(text, voice_name)
 
-                # settle the narrator - either confirm the voice OR set to default if the narrator voice is missing or is not in the voice listing
-                if self.dialogue_helper.use_different_speakers and self.dialogue_helper.narrator and not self.dialogue_helper.narrator_confirmed:
-                    # if we want to use different speakers, there is an alleged narrator, and the narrator has not been confirmed
-                    self.dialogue_helper.narrator = self.get_voice_info(self.dialogue_helper.narrator)[0]
-                    self.dialogue_helper.narrator_confirmed = True
-
-                audio_segments = []
-                parts = self.dialogue_helper.split_narrator_dialogue_with_names(text)
-                for content, speaker_type, character_name in parts:
-                    if speaker_type == 'pause':
-                        logger.info("Inserting pause...")
-                        # if the '**' was passed, this could be a forced pause - so add that
-                        pause_samples = int(sample_rate * self.pause_duration)
-                        segment_tensor = torch.zeros(pause_samples)
+                        # Handle numpy array vs torch tensor
+                        # Different F5-TTS versions return different data types, but the version as of August 2025 is indeed a NumPy array
+                        if isinstance(final_tensor, np.ndarray):
+                            final_tensor = torch.from_numpy(final_tensor).float()
                     else:
-                        if speaker_type == 'narrator':
-                            this_voice = self.dialogue_helper.narrator
-                        elif character_name is not None:
-                            temp_name = character_name.lower().strip()
-                            if temp_name in self.dialogue_helper.voice_mapping.keys():
-                                one_character = self.dialogue_helper.voice_mapping[temp_name]
+                        # if we ARE using multiple speakers (the narrator and the mapped speakers
+                        # were already resolved by _confirm_dialogue_voices, above the lock)
+
+                        audio_segments = []
+                        parts = self.dialogue_helper.split_narrator_dialogue_with_names(text)
+                        for content, speaker_type, character_name in parts:
+                            if speaker_type == 'pause':
+                                logger.info("Inserting pause...")
+                                # if the '**' was passed, this could be a forced pause - so add that
+                                pause_samples = int(sample_rate * self.pause_duration)
+                                segment_tensor = torch.zeros(pause_samples)
                             else:
-                                logger.warning(f"Warning - {temp_name} not in names list, using 'default' instead.")
-                                temp_name = 'default'
-                                one_character = self.dialogue_helper.voice_mapping[temp_name]
-                            if one_character and one_character.get('tts_name', ''):
-                                this_voice = one_character['tts_name']
-                            else:
-                                this_voice = voice_name
+                                if speaker_type == 'narrator':
+                                    this_voice = self.dialogue_helper.narrator
+                                elif character_name is not None:
+                                    temp_name = character_name.lower().strip()
+                                    if temp_name in self.dialogue_helper.voice_mapping.keys():
+                                        one_character = self.dialogue_helper.voice_mapping[temp_name]
+                                    else:
+                                        logger.warning(f"Warning - {temp_name} not in names list, using 'default' instead.")
+                                        temp_name = 'default'
+                                        one_character = self.dialogue_helper.voice_mapping[temp_name]
+                                    if one_character and one_character.get('tts_name', ''):
+                                        this_voice = one_character['tts_name']
+                                    else:
+                                        this_voice = voice_name
+                                else:
+                                    this_voice = voice_name
+
+                                # run this subsection through F5-TTS
+                                segment_tensor, sample_rate = self.single_pass(content, this_voice)  # Returns tensor
+
+                                # Convert to torch tensor immediately:
+                                if isinstance(segment_tensor, np.ndarray):
+                                    segment_tensor = torch.from_numpy(segment_tensor).float()
+
+                            audio_segments.append(segment_tensor)
+
+                        if audio_segments:
+                            # Add pauses between segments (all as tensors)
+                            pause_samples = int(sample_rate * self.segment_spacer_duration)
+                            pause = torch.zeros(pause_samples)
+
+                            # Concatenate all tensors
+                            final_audio = []
+                            for i, segment in enumerate(audio_segments):
+                                final_audio.append(segment)
+                                if i < len(audio_segments) - 1:
+                                    final_audio.append(pause)
+
+                            final_tensor = torch.cat(final_audio)
                         else:
-                            this_voice = voice_name
+                            # Nothing to assemble - raise rather than fall through, as everything
+                            # below this point works on a tensor that would never have been built.
+                            raise ValueError("No audio segments returned for multiple speakers - nothing to turn into audio.")
+                    # END - multiple speakers
 
-                        # run this subsection through F5-TTS
-                        segment_tensor, sample_rate = self.single_pass(content, this_voice)  # Returns tensor
+                finally:
+                    # Release this request's VRAM before handing the lock on, so the next client's
+                    # peak allocation does not have to sit alongside this one's leftovers.
+                    # empty_cache() acts on the calling thread's current device, which
+                    # _bind_thread_to_gpu has already set to the right card.
+                    gc.collect()
+                    if self.use_cuda:
+                        torch.cuda.empty_cache()
 
-                        # Convert to torch tensor immediately:
-                        if isinstance(segment_tensor, np.ndarray):
-                            segment_tensor = torch.from_numpy(segment_tensor).float()
-
-                    audio_segments.append(segment_tensor)
-
-                if audio_segments:
-                    # Add pauses between segments (all as tensors)
-                    pause_samples = int(sample_rate * self.segment_spacer_duration)
-                    pause = torch.zeros(pause_samples)
-
-                    # Concatenate all tensors
-                    final_audio = []
-                    for i, segment in enumerate(audio_segments):
-                        final_audio.append(segment)
-                        if i < len(audio_segments) - 1:
-                            final_audio.append(pause)
-
-                    final_tensor = torch.cat(final_audio)
-                else:
-                    logger.error("No audio segments returned for multiple speakers...")
-            # END - multiple speakers
-
+            # ------------------------------------------------------------------ CPU only work
+            # Reshaping the tensor and encoding the WAV is pure CPU work, so it happens after the
+            # lock has been released and the next client is already under way.
 
             # Ensure audio tensor has correct dimensions for saving
             # torchaudio.save expects (channels, samples) format
@@ -524,7 +681,8 @@ class AmadeoF5:
             'narrator_voice': str,
             'voice_mapping_file': str,
             'pause_duration': float,
-            'segment_spacer_duration': float
+            'segment_spacer_duration': float,
+            'gpu': int
         }
 
         if not os.path.exists(filepath):
@@ -592,6 +750,7 @@ class AmadeoF5:
 
         parser.add_argument("--model", default=AmadeoF5.MODEL,help="Select a pre-defined model. These are the options: F5TTS_v1_Base - The current default model; F5-TTS - Main model, good balance of speed/quality; E2-TTS - Alternative architecture, might have different characteristics.")
         parser.add_argument("--model_path", default=AmadeoF5.MODEL_PATH,help="The path to a custom model, if you find one on huggingface....")
+        parser.add_argument("--gpu", type=int, default=AmadeoF5.GPU_INDEX,help="The index of the CUDA GPU to load the model onto, matching the order 'nvidia-smi -L' reports (0 for the first GPU, 1 for the second, and so on); the ordering is pinned to the physical slot order via CUDA_DEVICE_ORDER, so it does not depend on which card CUDA considers fastest. Defaults to the first GPU. Ignored if no CUDA device is available.")
         parser.add_argument("--json", type=str, default="", help="If this points to a valid JSON file, the ENTIRE parameter settings are pulled from that file, and the defaults - and other arguments passed from the command line - are ignored. If the JSON load fails for whatever reason, though, the defaults WILL be engaged. Just remember that if there is a dash in the arg name, its going to be an underscore in the JSON.")
 
         argDict = {}
@@ -619,6 +778,7 @@ class AmadeoF5:
 
                     argDict['model'] = config_dict.get('model', AmadeoF5.MODEL)
                     argDict['model_path'] = config_dict.get('model_path', AmadeoF5.MODEL_PATH)
+                    argDict['gpu'] = config_dict.get('gpu', AmadeoF5.GPU_INDEX)
 
                     argDict['voice_mapping_file'] = config_dict.get('voice_mapping_file', AmadeoF5.VOICE_MAPPING_FILE)
                     argDict['narrator_voice'] = config_dict.get('narrator_voice', AmadeoF5.NARRATOR_VOICE)
@@ -649,6 +809,7 @@ class AmadeoF5:
 
                 argDict['model'] = args.model
                 argDict['model_path'] = args.model_path
+                argDict['gpu'] = args.gpu
                 argDict['voice_mapping_file'] = args.voice_mapping_file
                 argDict['use_different_speakers'] = args.use_different_speakers
                 argDict['narrator_voice'] = args.narrator_voice

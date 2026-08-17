@@ -19,12 +19,16 @@ Key Features:
 - Graceful shutdown with Ctrl-C (no hanging)
 - Proper socket cleanup and timeout handling
 - Supports multiple voice configurations via voices.json
+- Safe for concurrent clients: each connection gets its own thread, and the shared F5-TTS model is
+  serialised behind a lock, so two people asking for speech at once queue rather than collide
+- Runs on a selectable GPU via --gpu, indexed the same way 'nvidia-smi -L' lists the cards
 
 
 Examples:
   python f5-simple-server.py                                    # Start on localhost:8888
   python f5-simple-server.py --host 0.0.0.0 --port 9999      # Listen on all interfaces, port 9999
   python f5-simple-server.py --voices /path/to/my/voices      # Use custom voice directory
+  python f5-simple-server.py --gpu 1                          # Load the model onto the second GPU (default: 0)
   python f5-simple-server.py --json /path/to/json/config/file/f5-tts-simple-server.json
 """
 
