@@ -1,15 +1,15 @@
 """
-TTS Server - Receives JSON requests with voice and text, returns WAV files using f5-tts
+TTS Server - Receives JSON requests with voice and text, returns WAV files using Kokoro
 
 This server listens for client connections, receives JSON requests containing text to speak
-and a voice identifier, uses F5-TTS to generate speech audio, and sends the resulting
+and a voice identifier, uses Kokoro to generate speech audio, and sends the resulting
 WAV file back to the client.
 
 Protocol:
 1. Client connects via TCP socket
 2. Client sends 4-byte header with JSON length
 3. Client sends JSON: {"text": "...", "voice": "..."}
-4. Server processes with F5-TTS
+4. Server processes with Kokoro
 5. Server sends response header + JSON status
 6. Server sends WAV file data (if successful)
 7. Connection closes
@@ -19,13 +19,17 @@ Key Features:
 - Graceful shutdown with Ctrl-C (no hanging)
 - Proper socket cleanup and timeout handling
 - Supports multiple voice configurations via voices.json
+- Safe for concurrent clients: each connection gets its own thread, and the shared Kokoro pipeline
+  is serialised behind a lock, so two people asking for speech at once queue rather than collide
+- Runs on a selectable GPU via --gpu, indexed the same way 'nvidia-smi -L' lists the cards
 
 
 Examples:
-  python f5-simple-server.py                                    # Start on localhost:8888
-  python f5-simple-server.py --host 0.0.0.0 --port 9999      # Listen on all interfaces, port 9999
-  python f5-simple-server.py --voices /path/to/my/voices      # Use custom voice directory
-  python f5-simple-server.py --json /path/to/json/config/file/f5-tts-simple-server.json
+  python kokoro-simple-server.py                                    # Start on localhost:8888
+  python kokoro-simple-server.py --host 0.0.0.0 --port 9999      # Listen on all interfaces, port 9999
+  python kokoro-simple-server.py --voices /path/to/my/voices      # Use custom voice directory
+  python kokoro-simple-server.py --gpu 1                          # Load the model onto the second GPU (default: 0)
+  python kokoro-simple-server.py --json /path/to/json/config/file/kokoro-simple-server.json
 """
 
 import warnings
@@ -57,7 +61,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Set logging levels
-logging.getLogger('f5_tts').setLevel(logging.WARNING)
+logging.getLogger('kokoro').setLevel(logging.WARNING)
 
 class TTSServer:
 
