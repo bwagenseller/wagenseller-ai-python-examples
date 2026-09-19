@@ -10,8 +10,8 @@ from amadeo_utils.colored_text import ColoredText
 from amadeo_utils.ai.llm.llama.llama_utils import LlamaUtils
 from amadeo_utils.misc_utils.FileEncryption import AmadeoEncryption
 
-# Ensure you have pyarrow and fastparquet installed for DataFrame persistence:
-# pip install pyarrow fastparquet
+# DataFrame persistence uses parquet via pandas, which needs an engine: pyarrow, pinned in the 'llm' extra of
+# pyproject.toml. pandas picks it by default and nothing here names an engine, so fastparquet is not needed.
 
 
 class VectorDB:

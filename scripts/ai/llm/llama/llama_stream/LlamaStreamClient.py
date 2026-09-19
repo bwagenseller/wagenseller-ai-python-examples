@@ -1,5 +1,14 @@
 import os
 import sys
+
+# Line editing for the '>>:' prompt. Importing readline is all it takes: input() then supports the arrow keys, Home/End,
+# Ctrl-A/Ctrl-E and word jumps for fixing a typo mid-line, and Up/Down to recall this session's earlier inputs. Without
+# it the arrow keys just insert escape codes such as '^[[D'. The history stays in memory only - nothing typed is written
+# to disk. Optional, because some Python builds lack the module; the script works the same without it.
+try:
+    import readline  # noqa: F401 - imported for its side effect on input()
+except ImportError:
+    pass
 import logging
 from typing import Optional
 

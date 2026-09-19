@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from amadeo_utils.ai.llm.llama.subjective_constants import SubjectiveConstants
+from amadeo_utils.ai.llm.llama import chat_template as ChatTemplate
 from amadeo_utils.colored_text import ColoredText
 from typing import Callable, Optional
 
@@ -39,6 +40,51 @@ class LlamaUtils:
     MAX_RESPONSE_TOKENS = 512
 
     REPEAT_PENALITY = 1.1
+
+    # Attention and KV cache options for the GENERATIVE model. The defaults reproduce llama-cpp-python's own behaviour
+    # exactly (flash attention off, a 16-bit cache), so a config that does not mention them runs as it always has.
+    # See build_context_kwargs for what they do and when to change them.
+    FLASH_ATTN = False
+    KV_CACHE_TYPE = "f16"
+
+    # Extra generation room granted on a '!reason' turn, ON TOP of the normal response budget, because a model's
+    # deliberation comes out of the same max_tokens as its answer. Sized from measurement on the RTX 5090 (CS-17,
+    # 2026-09-19; three chat questions, two runs each): the longest deliberations seen were ~750 tokens for Qwen 3.6,
+    # ~600 for Muse Glimmer and ~400 for Gemma 4 - so at the usual 256-token budget Qwen could never answer at all.
+    # 2048 is roughly three times the worst case, leaving room for the longer deliberation a full role-play prompt and
+    # history invite; it costs context only on the turn that asks for it. See reasoning_allowance().
+    # Deliberately NOT done with the '!long'/'!verylong' prefixes - those also append a hidden 'fill the entire token
+    # count' instruction, and reasoning models then spend their whole budget planning an essay.
+    REASONING_BUDGET_TOKENS = 2048
+
+    # Tokens added SILENTLY to every ordinary (non-'!reason') turn, for a model that deliberates even with reasoning
+    # suppressed. Muse Glimmer's only control is an advisory 'Reasoning strength' line, so it still thinks before each
+    # reply - out of the same max_tokens as the answer. 0 for every model whose suppression is a real switch.
+    SUPPRESSED_REASONING_TOKENS = 0
+
+    # The answer budgets behind the length prefixes ('!veryshort' ... '!verylong'). A system config may override any of
+    # them via an optional 'response_token_presets' object; any preset it leaves out keeps the value here.
+    RESPONSE_TOKEN_PRESETS = {
+        "veryshort": 32,
+        "short": 64,
+        "medium": 128,
+        "normal": 256,
+        "long": 512,
+        "verylong": 1024,
+    }
+
+    # The KV cache types llama.cpp accepts, mapped to their ggml type ids. The ids are resolved from the llama_cpp
+    # binding at runtime where possible; these literal values are the fallback, exactly as with SPLIT_MODE_* below.
+    # 'bf16' is deliberately absent: llama-cpp-python 0.3.35 does not expose a GGML_TYPE_BF16 constant.
+    KV_CACHE_TYPES = {
+        "f16": 1,
+        "q8_0": 8,
+        "q5_1": 7,
+        "q5_0": 6,
+        "q4_1": 3,
+        "q4_0": 2,
+        "iq4_nl": 20,
+    }
 
     MAX_VECTOR_DB_PCNT = .2  # A number from 0 to 1; it represents the percentage of the share of the overall chat history that is occupied by items from the vector database. Note that if the entire chat history fits into n_ctx the vector database will not be used
     BUFFER_CTX_PCNT = .05  # A number from 0 to 1; it represents the percentage of the share of the overall context tokens we want to use as a 'buffer'; since We cant fully guess the number of tokens in the chat history we send to the LLM, we approximate as best we can. This number is a buffer to help ensure that we do not hit this limit, as the LLM WILL fail if we do.
@@ -168,6 +214,65 @@ class LlamaUtils:
         return {'split_mode': split_none, 'main_gpu': gpu_index, 'tensor_split': None}
 
 
+    @staticmethod
+    def build_context_kwargs(flash_attn: bool, kv_cache_type: str, log_func: Callable[[str], None] = print) -> dict:
+        """
+        Works out the attention and KV cache keyword arguments for the GENERATIVE model's Llama constructor, and reports
+        what it decided. Neither setting is new - both have been in llama.cpp since 2024 - but nothing here set them
+        until Gemma 4 needed them (CS-17), so they sat at llama-cpp-python's defaults: flash attention off, 16-bit cache.
+
+        Why they matter. VRAM has to hold three things, not one: the model's weights (roughly the .gguf size), the KV
+        cache (the conversation's working memory, which grows with 'max_context_tokens' and with the model's attention
+        shape), and a compute scratch buffer. The .gguf fitting on the card is therefore not enough. Measured on the
+        RTX 5090 at 8192 context: Gemma 3 27B needs 21.1 GB of weights plus a 4.0 GB cache and fits with 6 GB to spare;
+        Gemma 4 31B needs 24.0 GB plus a 7.4 GB cache - its attention heads are twice as wide, so each cached token
+        costs twice as much - and runs out of memory.
+
+          - flash_attn: a faster attention algorithm that works in tiles instead of materialising a large scratch
+            matrix. Uses less memory and is usually quicker. It is also a PREREQUISITE for a quantised V cache: llama.cpp
+            cannot store the V half of the cache below 16 bits without it.
+          - kv_cache_type: the precision the cache is stored at. 'f16' is 2 bytes per value; 'q8_0' is about 1, which
+            halves the cache with negligible quality cost in practice; the 4-bit types quarter it but start to cost
+            quality. Applied to both halves of the cache (K and V) together.
+
+        Gemma 4 on the 5090 illustrates the trade: flash_attn + q8_0 with every layer on the GPU runs at 49 tok/s with
+        3.7 GB free, while the only no-code alternative - leaving layers off the GPU - fits at 18 tok/s.
+
+        Rejected alternative, recorded so nobody reaches for it later: llama.cpp's 'swa_full=False' would shrink a
+        sliding-window model's cache further, but llama-cpp-python reuses cached prompt prefixes between turns without
+        checking that the discarded window is still present (llama-server does check), and role-play turns change near
+        the top every turn. That combination can silently degrade replies.
+
+        :param flash_attn: Whether to enable flash attention for the generative model.
+        :param kv_cache_type: The KV cache precision; one of the keys of KV_CACHE_TYPES.
+        :param log_func: The function that prints whatever we are targeting.
+        :return: A dictionary of keyword arguments to splat into the generative model's Llama constructor.
+        :raises ValueError: On an unknown cache type, or a quantised cache without flash attention - the latter would
+                            otherwise surface as llama.cpp's bare 'Failed to create llama_context' at load time.
+        """
+        cache = (kv_cache_type or LlamaUtils.KV_CACHE_TYPE).strip().lower()
+        if cache not in LlamaUtils.KV_CACHE_TYPES:
+            raise ValueError(
+                f"Unknown KV cache type '{kv_cache_type}'; valid types are: {', '.join(LlamaUtils.KV_CACHE_TYPES)}."
+            )
+        if cache != "f16" and not flash_attn:
+            raise ValueError(
+                f"KV cache type '{cache}' requires flash attention: llama.cpp cannot quantise the V cache without it. "
+                f"Set 'flash_attn' to true (or pass '--flash-attn'), or use the 'f16' cache."
+            )
+
+        kwargs = {'flash_attn': bool(flash_attn)}
+        if cache != "f16":
+            # Resolve the id from the binding if it has one; the table is the fallback.
+            import llama_cpp
+            type_id = getattr(llama_cpp, 'GGML_TYPE_' + cache.upper(), LlamaUtils.KV_CACHE_TYPES[cache])
+            kwargs['type_k'] = type_id
+            kwargs['type_v'] = type_id
+
+        log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.build_context_kwargs: Flash attention {'ON' if flash_attn else 'off'}, KV cache type '{cache}' for the generative model.{ColoredText.END_TEXT}")
+        return kwargs
+
+
     ################################################################################################################### Building The Argument Parser ####################################################################################################################
 
     """
@@ -208,6 +313,10 @@ class LlamaUtils:
 
         parser.add_argument("-g", "--gpu", type=int, default=LlamaUtils.GPU_INDEX,help="The index of the CUDA GPU to load the models onto, matching the order 'nvidia-smi -L' reports (0 for the first GPU, 1 for the second, and so on); the ordering is pinned to the physical slot order via CUDA_DEVICE_ORDER, so it does not depend on which card CUDA considers fastest. Defaults to the first GPU. Ignored if no CUDA device is available, and ignored if '--split-gpus' is used.")
         parser.add_argument("-sg", "--split-gpus", action='store_true',help="Spread the generative model across EVERY CUDA GPU on this machine rather than loading it onto the single card named by '--gpu'. This is how you run a model whose weights do not fit in the VRAM of any one card. The embedding model is small and is always loaded onto the '--gpu' card regardless. Has no effect on a single GPU machine.")
+        parser.add_argument("-fa", "--flash-attn", action='store_true',help="Enable flash attention for the generative model: a faster attention algorithm that also uses less VRAM, and a prerequisite for any '--kv-cache-type' other than f16. Off by default, matching llama-cpp-python's own default.")
+        parser.add_argument("-kvt", "--kv-cache-type", default=LlamaUtils.KV_CACHE_TYPE, choices=list(LlamaUtils.KV_CACHE_TYPES),help="The precision of the generative model's KV cache (the conversation's working memory in VRAM). 'f16' is the default; 'q8_0' halves the cache with negligible quality cost and is what lets Gemma 4 fit on a 32 GB card; the 4-bit types quarter it but begin to cost quality. Anything other than f16 requires '--flash-attn'.")
+        parser.add_argument("-rbt", "--reasoning-budget-tokens", type=int, default=LlamaUtils.REASONING_BUDGET_TOKENS,help="Extra tokens a '!reason' turn may spend deliberating, on top of the normal response budget (capped at half the context left). Only matters for models with a reasoning mode.")
+        parser.add_argument("-srt", "--suppressed-reasoning-tokens", type=int, default=LlamaUtils.SUPPRESSED_REASONING_TOKENS,help="Extra tokens added silently to every ordinary turn, for a model that deliberates even with reasoning suppressed (Muse Glimmer). Leave at 0 for everything else. The length-prefix budgets have no command-line form; set them with 'response_token_presets' in a system config JSON.")
         parser.add_argument("-gl", "--gpu-layers", type=int, default=LlamaUtils.GPU_LAYERS,help="How many GPU layers do you want for the text generator model? -1 means try to get them all, but be warned: if the GPU layers are too high, the model will not fit in VRAM this will fail. This number is usually between 10 and 70, IF -1 does not work.")
         parser.add_argument("-egl", "--embedding-gpu-layers", type=int, default=LlamaUtils.EMBEDDING_GPU_LAYERS,help="Similar to --gpu-layers but for the embedding model (see that description). You will usually want -1 for this. If -1 doesn't work, you can try some value between 10 and 100, but if -1 doesnt work, you probably have much bigger problems as embedding models are very small.")
         parser.add_argument("-mct", "--max-context-tokens", type=int, default=LlamaUtils.MAX_CTX,help="Known as 'n_ctx' in the llama binary, this is the max token count for the entire conversation, including vector database retrieval, chat history, current prompt, and LLM response. This should usually be a power of 2, and common choices are 512, 2048, 4096, or 8192, but it can go higher. Llama 3 models typically have n_ctx of 8192 or more. Just know that the space this tames is n_ctx^2 and it does count against your VRAM.")
@@ -428,6 +537,11 @@ class LlamaUtils:
                 # leave two classes of optional field behaving differently and make the config harder to reason about.
                 argDict['gpu'] = config_dict.get('gpu', LlamaUtils.GPU_INDEX)
                 argDict['split_gpus'] = config_dict.get('split_gpus', False)
+                argDict['flash_attn'] = config_dict.get('flash_attn', LlamaUtils.FLASH_ATTN)
+                argDict['kv_cache_type'] = config_dict.get('kv_cache_type', LlamaUtils.KV_CACHE_TYPE)
+                argDict['response_token_presets'] = LlamaUtils.resolve_response_token_presets(config_dict.get('response_token_presets'))
+                argDict['reasoning_budget_tokens'] = LlamaUtils.resolve_token_count(config_dict.get('reasoning_budget_tokens', LlamaUtils.REASONING_BUDGET_TOKENS), 'reasoning_budget_tokens')
+                argDict['suppressed_reasoning_tokens'] = LlamaUtils.resolve_token_count(config_dict.get('suppressed_reasoning_tokens', LlamaUtils.SUPPRESSED_REASONING_TOKENS), 'suppressed_reasoning_tokens')
                 argDict['repeat_penalty'] = config_dict.get('repeat_penalty', LlamaUtils.REPEAT_PENALITY)
 
                 log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_system_args_dict: System config loaded from JSON file {json_config_file}; the generating model is '{argDict['generating_model']}' and the embedding model is '{argDict['embedding_model']}'.{ColoredText.END_TEXT}")
@@ -461,6 +575,11 @@ class LlamaUtils:
 
             argDict['gpu'] = args.gpu
             argDict['split_gpus'] = args.split_gpus
+            argDict['flash_attn'] = args.flash_attn
+            argDict['kv_cache_type'] = args.kv_cache_type
+            argDict['response_token_presets'] = dict(LlamaUtils.RESPONSE_TOKEN_PRESETS)
+            argDict['reasoning_budget_tokens'] = LlamaUtils.resolve_token_count(args.reasoning_budget_tokens, 'reasoning_budget_tokens')
+            argDict['suppressed_reasoning_tokens'] = LlamaUtils.resolve_token_count(args.suppressed_reasoning_tokens, 'suppressed_reasoning_tokens')
             argDict['repeat_penalty'] = args.repeat_penalty
 
             log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_system_args_dict: System config loaded from args / defaults; the generating model is '{argDict['generating_model']}' and the embedding model is '{argDict['embedding_model']}'.{ColoredText.END_TEXT}")
@@ -709,6 +828,11 @@ class LlamaUtils:
                     # as it did before GPU selection was added. See the same note in get_system_args_dict.
                     argDict['gpu'] = config_dict.get('gpu', LlamaUtils.GPU_INDEX)
                     argDict['split_gpus'] = config_dict.get('split_gpus', False)
+                    argDict['flash_attn'] = config_dict.get('flash_attn', LlamaUtils.FLASH_ATTN)
+                    argDict['kv_cache_type'] = config_dict.get('kv_cache_type', LlamaUtils.KV_CACHE_TYPE)
+                    argDict['response_token_presets'] = LlamaUtils.resolve_response_token_presets(config_dict.get('response_token_presets'))
+                    argDict['reasoning_budget_tokens'] = LlamaUtils.resolve_token_count(config_dict.get('reasoning_budget_tokens', LlamaUtils.REASONING_BUDGET_TOKENS), 'reasoning_budget_tokens')
+                    argDict['suppressed_reasoning_tokens'] = LlamaUtils.resolve_token_count(config_dict.get('suppressed_reasoning_tokens', LlamaUtils.SUPPRESSED_REASONING_TOKENS), 'suppressed_reasoning_tokens')
 
                     log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_args_dict_role_play_server: Config loaded from JSON file {json_config_file}; prompt directory is '{argDict['system_prompt_dir']}' and base convo directory is '{argDict['base_convo_dir']}'.{ColoredText.END_TEXT}")
                     use_default_arg_config = False
@@ -751,6 +875,11 @@ class LlamaUtils:
 
                 argDict['gpu'] = args.gpu
                 argDict['split_gpus'] = args.split_gpus
+                argDict['flash_attn'] = args.flash_attn
+                argDict['kv_cache_type'] = args.kv_cache_type
+                argDict['response_token_presets'] = dict(LlamaUtils.RESPONSE_TOKEN_PRESETS)
+                argDict['reasoning_budget_tokens'] = LlamaUtils.resolve_token_count(args.reasoning_budget_tokens, 'reasoning_budget_tokens')
+                argDict['suppressed_reasoning_tokens'] = LlamaUtils.resolve_token_count(args.suppressed_reasoning_tokens, 'suppressed_reasoning_tokens')
 
                 log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_args_dict_role_play_server: Config loaded from args / defaults; prompt directory is '{argDict['system_prompt_dir']}' and base convo directory is '{argDict['base_convo_dir']}'.{ColoredText.END_TEXT}")
 
@@ -834,6 +963,8 @@ class LlamaUtils:
                     # as it did before GPU selection was added. See the same note in get_system_args_dict.
                     argDict['gpu'] = config_dict.get('gpu', LlamaUtils.GPU_INDEX)
                     argDict['split_gpus'] = config_dict.get('split_gpus', False)
+                    argDict['flash_attn'] = config_dict.get('flash_attn', LlamaUtils.FLASH_ATTN)
+                    argDict['kv_cache_type'] = config_dict.get('kv_cache_type', LlamaUtils.KV_CACHE_TYPE)
 
                     log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_args_dict_knowledge_base_server: Config loaded from JSON file {json_config_file}; system prompt file is '{argDict['system_prompt_file']}'.{ColoredText.END_TEXT}")
                     use_default_arg_config = False
@@ -875,6 +1006,8 @@ class LlamaUtils:
 
                 argDict['gpu'] = args.gpu
                 argDict['split_gpus'] = args.split_gpus
+                argDict['flash_attn'] = args.flash_attn
+                argDict['kv_cache_type'] = args.kv_cache_type
 
                 log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_args_dict_knowledge_base_server: Config loaded from args / defaults; system prompt file is '{argDict['system_prompt_file']}'.{ColoredText.END_TEXT}")
 
@@ -978,7 +1111,8 @@ class LlamaUtils:
 
         Returns:
             dict: A dictionary containing the scraped configuration fields. All fields are required except
-                  'model_type', 'chat_format', 'gpu', 'split_gpus', and 'repeat_penalty'. An example of a JSON doc:
+                  'model_type', 'chat_format', 'gpu', 'split_gpus', 'flash_attn', 'kv_cache_type', 'response_token_presets', 'reasoning_budget_tokens',
+                  'suppressed_reasoning_tokens', and 'repeat_penalty'. An example of a JSON doc:
             {
                 "base_model_dir": "/home/kevin/ai/models/llama.cpp",
                 "base_embedding_dir": "/home/kevin/ai/models/llama.cpp/embedding_models",
@@ -989,6 +1123,11 @@ class LlamaUtils:
 
                 "gpu": 0,
                 "split_gpus": false,
+                "flash_attn": false,
+                "kv_cache_type": "f16",
+                "reasoning_budget_tokens": 2048,
+                "suppressed_reasoning_tokens": 0,
+                "response_token_presets": {"veryshort": 32, "short": 64, "medium": 128, "normal": 256, "long": 512, "verylong": 1024},
                 "gpu_layers": 57,
                 "embedding_gpu_layers": -1,
                 "max_context_tokens": 4096,
@@ -1031,13 +1170,19 @@ class LlamaUtils:
         }
 
         # Optional fields with their types; if these are absent, the caller falls back to the class defaults.
-        # 'gpu', 'split_gpus', and 'repeat_penalty' are optional rather than required so that a system config written
-        # before they existed still loads cleanly - a missing 'gpu' simply means the first GPU.
+        # 'gpu', 'split_gpus', 'flash_attn', 'kv_cache_type', and 'repeat_penalty' are optional rather than required so
+        # that a system config written before they existed still loads cleanly - a missing 'gpu' simply means the first
+        # GPU, and a missing 'flash_attn' / 'kv_cache_type' means llama-cpp-python's own defaults.
         optional_fields = {
             'model_type': str,
             'chat_format': (str, type(None)),  # 'chat_format' is usually left null so llama.cpp can work it out itself
             'gpu': int,
             'split_gpus': bool,
+            'flash_attn': bool,
+            'kv_cache_type': str,
+            'response_token_presets': dict,
+            'reasoning_budget_tokens': int,
+            'suppressed_reasoning_tokens': int,
             'repeat_penalty': float
         }
 
@@ -1110,7 +1255,8 @@ class LlamaUtils:
 
         Returns:
             dict: A dictionary containing the scraped configuration fields. All fields are required except
-                  'model_type', 'chat_format', 'encrypted', 'debug', 'gpu', and 'split_gpus'. An example of a JSON doc:
+                  'model_type', 'chat_format', 'encrypted', 'debug', 'gpu', 'split_gpus', 'flash_attn', 'kv_cache_type', 'response_token_presets',
+                  'reasoning_budget_tokens', and 'suppressed_reasoning_tokens'. An example of a JSON doc:
             {
                 "host": "127.0.0.1",
                 "port": 65440,
@@ -1127,6 +1273,11 @@ class LlamaUtils:
 
                 "gpu": 0,
                 "split_gpus": false,
+                "flash_attn": false,
+                "kv_cache_type": "f16",
+                "reasoning_budget_tokens": 2048,
+                "suppressed_reasoning_tokens": 0,
+                "response_token_presets": {"veryshort": 32, "short": 64, "medium": 128, "normal": 256, "long": 512, "verylong": 1024},
                 "gpu_layers": 57,
                 "embedding_gpu_layers": -1,
                 "max_context_tokens": 4096,
@@ -1181,14 +1332,20 @@ class LlamaUtils:
         }
 
         # Optional fields with their types; if these are absent, the caller falls back to the class defaults.
-        # 'gpu' and 'split_gpus' are optional so that a server config written before GPU selection existed still loads.
+        # 'gpu' and 'split_gpus' are optional so that a server config written before GPU selection existed still loads;
+        # 'flash_attn' and 'kv_cache_type' likewise, for configs written before they existed (CS-17).
         optional_fields = {
             'model_type': str,
             'chat_format': (str, type(None)),  # 'chat_format' is usually left null so llama.cpp can work it out itself
             'encrypted': bool,
             'debug': bool,
             'gpu': int,
-            'split_gpus': bool
+            'split_gpus': bool,
+            'flash_attn': bool,
+            'kv_cache_type': str,
+            'response_token_presets': dict,
+            'reasoning_budget_tokens': int,
+            'suppressed_reasoning_tokens': int
         }
 
         return LlamaUtils.scrape_json_config(filepath, required_fields, optional_fields)
@@ -1208,7 +1365,7 @@ class LlamaUtils:
 
         Returns:
             dict: A dictionary containing the scraped configuration fields. All fields are required except
-                  'model_type', 'chat_format', 'debug', 'gpu', and 'split_gpus'. An example of a JSON doc:
+                  'model_type', 'chat_format', 'debug', 'gpu', 'split_gpus', 'flash_attn', and 'kv_cache_type'. An example of a JSON doc:
             {
                 "host": "127.0.0.1",
                 "port": 65450,
@@ -1225,6 +1382,8 @@ class LlamaUtils:
 
                 "gpu": 0,
                 "split_gpus": false,
+                "flash_attn": false,
+                "kv_cache_type": "f16",
                 "gpu_layers": 57,
                 "embedding_gpu_layers": -1,
                 "max_context_tokens": 4096,
@@ -1277,13 +1436,16 @@ class LlamaUtils:
         }
 
         # Optional fields with their types; if these are absent, the caller falls back to the class defaults.
-        # 'gpu' and 'split_gpus' are optional so that a server config written before GPU selection existed still loads.
+        # 'gpu' and 'split_gpus' are optional so that a server config written before GPU selection existed still loads;
+        # 'flash_attn' and 'kv_cache_type' likewise, for configs written before they existed (CS-17).
         optional_fields = {
             'model_type': str,
             'chat_format': (str, type(None)),  # 'chat_format' is usually left null so llama.cpp can work it out itself
             'debug': bool,
             'gpu': int,
-            'split_gpus': bool
+            'split_gpus': bool,
+            'flash_attn': bool,
+            'kv_cache_type': str
         }
 
         return LlamaUtils.scrape_json_config(filepath, required_fields, optional_fields)
@@ -1483,6 +1645,96 @@ class LlamaUtils:
         #    from the removal (e.g., if the removed content was at the start/end).
         return cleaned_string.strip()
 
+    ################################################################################################################### Reasoning Allowance ####################################################################################################################
+    @staticmethod
+    def resolve_response_token_presets(overrides) -> dict:
+        """
+        Merges a config's 'response_token_presets' over the defaults in RESPONSE_TOKEN_PRESETS.
+
+        Partial overrides are the point: a config can change '!short' alone and inherit the rest. Mistakes raise
+        ValueError rather than KeyError/TypeError on purpose - the JSON loaders catch those two and fall back to the
+        defaults for the WHOLE system config, model included, so a typo in a preset name would otherwise quietly load
+        a different model instead of reporting the typo.
+
+        :param overrides: The config's 'response_token_presets' object, or None if the config has none.
+        :return: A complete presets dictionary.
+        :raises ValueError: On an unknown preset name, or a value that is not a positive integer.
+        """
+        presets = dict(LlamaUtils.RESPONSE_TOKEN_PRESETS)
+        if overrides is None:
+            return presets
+        if not isinstance(overrides, dict):
+            raise ValueError(f"'response_token_presets' must be a JSON object, not {type(overrides).__name__}.")
+        for name, value in overrides.items():
+            if name not in presets:
+                raise ValueError(f"Unknown response token preset '{name}'; valid presets are: {', '.join(presets)}.")
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"Response token preset '{name}' must be a positive whole number, not {value!r}.")
+            presets[name] = value
+        return presets
+
+    @staticmethod
+    def resolve_token_count(value, name: str) -> int:
+        """
+        Validates a whole-number token setting from a config, such as 'reasoning_budget_tokens'.
+
+        :param value: The configured value.
+        :param name: The setting's name, for the error message.
+        :return: The value, unchanged.
+        :raises ValueError: If it is not a whole number of zero or more - ValueError for the reason given in
+                            resolve_response_token_presets.
+        """
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"'{name}' must be a whole number of tokens, zero or more, not {value!r}.")
+        return value
+
+    @staticmethod
+    def turn_token_allowance(reason_used: bool, thinking_supported: bool, system_tokens: int, response_tokens: int,
+                             max_useable_tokens: float, argsDict: dict) -> int:
+        """
+        Extra max_tokens for this turn on top of the answer budget, to cover the model's deliberation.
+
+        A '!reason' turn on a reasoning model gets reasoning_allowance(); every other turn gets the config's
+        'suppressed_reasoning_tokens' (0 unless the model deliberates even when told not to). Kept separate from the
+        length presets deliberately: each preset also tells the model 'please use up to N tokens', so padding a preset
+        to cover hidden reasoning would ask for longer answers rather than making room for thinking.
+
+        :param reason_used: Whether this turn asked to see the model's reasoning.
+        :param thinking_supported: Whether the model has a reasoning mode we control.
+        :param system_tokens: Tokens taken by the system prompt.
+        :param response_tokens: The answer budget already chosen for this turn.
+        :param max_useable_tokens: The context available after the safety buffer.
+        :param argsDict: The run's settings, for 'reasoning_budget_tokens' and 'suppressed_reasoning_tokens'.
+        :return: Extra tokens to add to this turn's max_tokens.
+        """
+        if reason_used and thinking_supported:
+            return LlamaUtils.reasoning_allowance(system_tokens, response_tokens, max_useable_tokens,
+                                                  argsDict.get('reasoning_budget_tokens', LlamaUtils.REASONING_BUDGET_TOKENS))
+        return argsDict.get('suppressed_reasoning_tokens', LlamaUtils.SUPPRESSED_REASONING_TOKENS)
+
+    @staticmethod
+    def reasoning_allowance(system_tokens: int, response_tokens: int, max_useable_tokens: float,
+                            budget: Optional[int] = None) -> int:
+        """
+        How many extra tokens to allow a '!reason' turn for the model's deliberation.
+
+        Deliberation and answer share one max_tokens. At the usual 256-token response budget, Qwen 3.6 regularly spends
+        the whole of it reasoning and never reaches an answer, so the turn comes back empty. The allowance is capped at
+        half of whatever context remains after the system prompt and the answer budget, so that on a small context it
+        cannot crowd the conversation history out entirely.
+
+        :param system_tokens: Tokens taken by the system prompt.
+        :param response_tokens: The answer budget already chosen for this turn.
+        :param max_useable_tokens: The context available after the safety buffer.
+        :param budget: The model's configured 'reasoning_budget_tokens'; REASONING_BUDGET_TOKENS if not given.
+        :return: Extra tokens to add to this turn's max_tokens; 0 if there is no room.
+        """
+        if budget is None:
+            budget = LlamaUtils.REASONING_BUDGET_TOKENS
+        remaining = int(max_useable_tokens) - int(system_tokens) - int(response_tokens)
+        return max(0, min(budget, remaining // 2))
+
+
     ################################################################################################################### Fit History to Token Limit ####################################################################################################################
     @staticmethod
     def fit_to_token_limit(history_list, max_tokens):
@@ -1526,34 +1778,50 @@ class LlamaUtils:
     @staticmethod
     def universal_token_count(llm, role, content, model_type="auto"):
         """
-        This us a universal way to try and get the token count out of the model. The GGUF files _usually_ have he chat template properly embedded in the GGUF file. Usually. If so, you can simply use this to find the token count.
+        Counts the tokens that a single message contributes to a conversation.
+
+        The count is taken from the chat template the GGUF carries in its own metadata, which
+        makes it exact for any architecture without this function having to recognise the model.
+        See 'chat_template.count_message_tokens()' for how a single message's cost is isolated
+        from the fixed preamble the template emits around it.
+
+        This used to call 'llm._format_chat_prompt()', which is not a method llama-cpp-python has
+        ever provided - not in 0.3.9, not in 0.3.35. That call raised AttributeError every single
+        time, so the fallback chain below silently handled every model this code has ever run,
+        and any model whose FILENAME matched none of its branches failed outright. That is why
+        'gemma-4-...' (no match for the 'gemma-3' test) and 'Muse-Glimmer-...' (no match at all)
+        could not start, while Qwen kept working purely because 'qwen' appears in its filename.
+
+        The fallback is kept for GGUFs that genuinely ship without an embedded chat template,
+        but it is now the exception rather than the rule.
 
         :param llm: The LLM model.
         :param role: 'system', 'user', or 'assistant'
         :param content: The system prompt, the user request, or the LLM response.
-        :param model_type: 'llama2', 'llama3', or 'command-r'
+        :param model_type: Legacy hint, consulted only on the fallback path: 'llama-2', 'llama-3', 'command-r', 'qwen', or 'gemma-3'.
         :return: token count
         """
         try:
-            # Try universal method first
-            messages = [{"role": role, "content": content}]
-            prompt = llm._format_chat_prompt(messages)
-            tokens = llm.tokenize(prompt.encode())
-            return len(tokens)
-        except (AttributeError, Exception) as e:
-            # Fall back to model-specific methods
-            if model_type == "llama-3" or "llama-3" in llm.model_path.lower():
+            return ChatTemplate.count_message_tokens(llm, role, content)
+        except Exception as e:
+            # No embedded template (or it would not render) - fall back to the hand-written,
+            # per-model counters, which identify the model by its filename.
+            model_path = str(getattr(llm, "model_path", "")).lower()
+            if model_type == "llama-3" or "llama-3" in model_path:
                 return LlamaUtils.token_count_llama3(llm.tokenize, role, content)
-            elif model_type == "llama2" or "llama-2" in llm.model_path.lower():
+            elif model_type == "llama2" or "llama-2" in model_path:
                 return LlamaUtils.token_count_llama2(llm.tokenize, role, content)
-            elif model_type == "command-r" or "command-r" in llm.model_path.lower():
+            elif model_type == "command-r" or "command-r" in model_path:
                 return LlamaUtils.token_count_command_r(llm.tokenize, role, content)
-            elif model_type == "qwen" or "qwen" in llm.model_path.lower():
+            elif model_type == "qwen" or "qwen" in model_path:
                 return LlamaUtils.token_count_qwen(llm.tokenize, role, content)
-            elif model_type == "gemma-3" or "gemma-3" in llm.model_path.lower():
+            elif model_type == "gemma-3" or "gemma-3" in model_path:
                 return LlamaUtils.token_count_gemma3(llm.tokenize, role, content)
             else:
-                raise ValueError(f"Unknown model type and universal method failed: {e}")
+                raise ValueError(
+                    f"[{getattr(llm, 'model_path', '?')}] carries no usable chat template and matches no "
+                    f"known model type, so its token count cannot be determined: {e}"
+                )
 
     @staticmethod
     def token_count_gemma3(llm_tokenizer_func: Callable[[bytes], list[int]], role, content):

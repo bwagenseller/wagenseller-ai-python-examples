@@ -101,6 +101,9 @@ class KnowledgeBaseStream:
         gpu_index = self.argsDict.get('gpu', LlamaUtils.GPU_INDEX)
         embedder_gpu_kwargs = LlamaUtils.build_gpu_kwargs(gpu_index, False, 'embedding', logger.info)
         generator_gpu_kwargs = LlamaUtils.build_gpu_kwargs(gpu_index, self.argsDict.get('split_gpus', False), 'generative', logger.info)
+        # Flash attention and KV cache precision for the generative model only; the embedder is tiny and keeps the
+        # library defaults. See LlamaUtils.build_context_kwargs for why these exist and what they cost.
+        generator_context_kwargs = LlamaUtils.build_context_kwargs(self.argsDict.get('flash_attn', LlamaUtils.FLASH_ATTN), self.argsDict.get('kv_cache_type', LlamaUtils.KV_CACHE_TYPE), logger.info)
 
         # Initialize the EMBEDDING model
         self.llm_embedder = Llama(
@@ -125,7 +128,8 @@ class KnowledgeBaseStream:
             # chat_handler is often useful for proper prompt formatting with chat models,
             # but has been removed for compatibility. Ensure your generative model
             # is fine-tuned for conversational input without explicit chat handler.
-            **generator_gpu_kwargs
+            **generator_gpu_kwargs,
+            **generator_context_kwargs
         )
         logger.info(f"{ColoredText.GREEN_TEXT}RolePlay: Generative text model [{self.argsDict['generating_model']}] loaded with [{self.argsDict['generating_gpu_layers']}] GPU layers and a context size of [{self.argsDict['generating_max_context_tokens']}].{ColoredText.END_TEXT}")
 

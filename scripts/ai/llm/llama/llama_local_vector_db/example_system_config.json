@@ -8,6 +8,11 @@
 
     "gpu": 0,
     "split_gpus": false,
+    "flash_attn": false,
+    "kv_cache_type": "f16",
+    "reasoning_budget_tokens": 2048,
+    "suppressed_reasoning_tokens": 0,
+    "response_token_presets": {"veryshort": 32, "short": 64, "medium": 128, "normal": 256, "long": 512, "verylong": 1024},
     "gpu_layers": 57,
     "embedding_gpu_layers": -1,
     "max_context_tokens": 4096,

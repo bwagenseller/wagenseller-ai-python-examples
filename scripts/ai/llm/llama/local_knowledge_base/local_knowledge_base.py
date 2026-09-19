@@ -2,6 +2,15 @@ import numpy as np
 import os
 import sys
 
+# Line editing for the '>>:' prompt. Importing readline is all it takes: input() then supports the arrow keys, Home/End,
+# Ctrl-A/Ctrl-E and word jumps for fixing a typo mid-line, and Up/Down to recall this session's earlier inputs. Without
+# it the arrow keys just insert escape codes such as '^[[D'. The history stays in memory only - nothing typed is written
+# to disk. Optional, because some Python builds lack the module; the script works the same without it.
+try:
+    import readline  # noqa: F401 - imported for its side effect on input()
+except ImportError:
+    pass
+
 # IMPORTANT: llama_utils MUST be imported before llama_cpp. Importing llama_cpp loads the llama.cpp shared library,
 # which registers its GGML CUDA backend and pins the device ordering for the life of the process; llama_utils sets
 # CUDA_DEVICE_ORDER at import time so that '--gpu N' means the Nth card as 'nvidia-smi -L' lists it. Flip these two
@@ -18,8 +27,9 @@ import threading
 
 
 """
-Ensure you have 'llama-cpp-python', 'pyarrow', and 'fastparquet' installed:
-pip install llama-cpp-python pyarrow fastparquet
+Dependencies: see the 'llm' extra in pyproject.toml, which holds the exact pins and the install command. In short,
+llama-cpp-python must come from the prebuilt CUDA wheel with '--only-binary' - a plain 'pip install llama-cpp-python'
+can silently fall back to a CPU-only source build - and pyarrow is the only parquet engine needed (fastparquet is not).
 
 """
 
@@ -87,6 +97,9 @@ class KnowledgeBase:
         gpu_index = self.argsDict.get('gpu', LlamaUtils.GPU_INDEX)
         embedder_gpu_kwargs = LlamaUtils.build_gpu_kwargs(gpu_index, False, 'embedding')
         generator_gpu_kwargs = LlamaUtils.build_gpu_kwargs(gpu_index, self.argsDict.get('split_gpus', False), 'generative')
+        # Flash attention and KV cache precision for the generative model only; the embedder is tiny and keeps the
+        # library defaults. See LlamaUtils.build_context_kwargs for why these exist and what they cost.
+        generator_context_kwargs = LlamaUtils.build_context_kwargs(self.argsDict.get('flash_attn', LlamaUtils.FLASH_ATTN), self.argsDict.get('kv_cache_type', LlamaUtils.KV_CACHE_TYPE))
 
         # try
         # Initialize the EMBEDDING model
@@ -112,7 +125,8 @@ class KnowledgeBase:
             # chat_handler is often useful for proper prompt formatting with chat models,
             # but has been removed for compatibility. Ensure your generative model
             # is fine-tuned for conversational input without explicit chat handler.
-            **generator_gpu_kwargs
+            **generator_gpu_kwargs,
+            **generator_context_kwargs
         )
         print(f"{ColoredText.GREEN_TEXT}KnowledgeBase: Generative text model [{self.argsDict['generating_model']}] loaded with [{self.argsDict['generating_gpu_layers']}] GPU layers and a context size of [{self.argsDict['generating_max_context_tokens']}].{ColoredText.END_TEXT}")
 
@@ -478,7 +492,7 @@ if __name__ == "__main__":
         print("or there's a mismatch between loaded and new embeddings.")
     except Exception as e:
         print(f"\nAn unexpected error occurred during Llama model initialization or chat loop: {e}")
-        print("Ensure 'llama-cpp-python', 'pyarrow', 'fastparquet' are installed,")
+        print("Ensure the 'llm' extra from pyproject.toml is installed (llama-cpp-python from its CUDA wheel, plus pyarrow),")
         print("and your models are compatible and correctly specified. Also check n_ctx values.")
 """
 

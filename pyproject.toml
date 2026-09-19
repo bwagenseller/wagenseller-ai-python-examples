@@ -57,31 +57,29 @@ asr = [
     "whisperx==3.8.6",
     "webrtcvad-wheels==2.0.14",
 ]
-# The 'llama' conda env. Unlike the torch-based extras, this one cannot be fixed
-# with an index URL: llama-cpp-python ships NO prebuilt wheel with sm_120, so on
-# Blackwell (RTX 5090) it must be BUILT FROM SOURCE against CUDA 12.8:
+# The 'llama' conda env. Install llama-cpp-python from the PREBUILT CUDA 13 wheel; no
+# source build is needed on either machine (CS-17, 2026-09-19):
 #
-#   conda install -c nvidia cuda-toolkit=12.8
-#   export PATH="$CONDA_PREFIX/bin:$PATH"; hash -r      # see PATH note below
-#   export CUDA_HOME="$CONDA_PREFIX" CUDACXX="$CONDA_PREFIX/bin/nvcc"
-#   CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=120" \
-#     pip install --no-cache-dir --no-binary=llama-cpp-python "llama-cpp-python==0.3.9"
+#   pip install --only-binary=llama-cpp-python "llama-cpp-python==0.3.35" \
+#       --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu130
 #
-# CMAKE_CUDA_ARCHITECTURES MUST MATCH THE TARGET GPU - 120 is the RTX 5090 only.
-# For the 192.168.1.132 server (RTX 3090 = sm_86, RTX 4070 Ti = sm_89) build for
-# both: -DCMAKE_CUDA_ARCHITECTURES="86;89". Note the source build exists solely
-# because no prebuilt wheel ships sm_120; sm_86/89 are old enough that prebuilt
-# CUDA wheels cover them, so try those first on that box and skip all of this.
+# --only-binary IS NOT OPTIONAL. Without it, any miss in resolving the wheel falls back
+# to the sdist, whose build defaults to GGML_CUDA=OFF - a CPU-only install that imports
+# fine, accepts n_gpu_layers, and silently runs everything on the CPU.
 #
-# Use the CONDA CUDA 12.8 toolkit, not the desktop's system CUDA 13.3: 0.3.9's
-# vendored llama.cpp predates CUDA 13. The system nvcc at /usr/local/cuda shadows
-# the conda one because .bashrc re-prepends it AFTER conda activation - hence the
-# PATH override above. All of this is BUILD-time only; runtime just needs
-# `conda activate llama` with no LD_LIBRARY_PATH changes.
+# The wheel carries native kernels for sm_75/80/86/89/90 (so the .110 server's RTX 3090
+# and 4070 Ti run natively) plus sm_90 PTX, which the driver JIT-compiles for the RTX
+# 5090 (sm_120). The first generation after each load is slow while that compiles;
+# it is cached afterwards. A source build with -DCMAKE_CUDA_ARCHITECTURES=120 is now
+# only a speed optimisation. (The 0.3.9 era needed that build: no sm_120 at all.)
 #
-# pyarrow is here because VectorDB persists as parquet and pandas needs an engine.
+# 0.3.35 is also a hard floor for the reasoning models: 0.3.9's chat formatter accepts
+# template variables such as enable_thinking and then silently drops them.
+#
+# pyarrow is here because VectorDB persists as parquet and pandas needs an engine; it
+# is the only engine needed (pandas picks it by default - fastparquet is not required).
 llm = [
-    "llama-cpp-python==0.3.9",
+    "llama-cpp-python==0.3.35",
     "numpy==2.3.1",
     "pandas==2.2.3",
     "pyarrow==25.0.0",

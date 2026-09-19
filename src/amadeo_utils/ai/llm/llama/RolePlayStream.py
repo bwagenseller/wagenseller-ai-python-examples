@@ -8,6 +8,7 @@ import getpass
 # CUDA_DEVICE_ORDER at import time so that '--gpu N' means the Nth card as 'nvidia-smi -L' lists it. Flip these two
 # lines and the GPU selection silently reverts to CUDA's own 'fastest first' ordering.
 from amadeo_utils.ai.llm.llama.llama_utils import LlamaUtils
+from amadeo_utils.ai.llm.llama import chat_template as ChatTemplate
 from llama_cpp import Llama
 
 from typing import Dict, Any, Optional
@@ -35,6 +36,7 @@ class RolePlayStream:
     SAVE_PREFIX = "!save"
     LOAD_PREFIX = "!load"
     THINK_PREFIX = "!remember"
+    REASON_PREFIX = "!reason"
     SEE_PAST_PREFIX = "!history"
     STRIKE_PREFIX = "!strike"
     CRYSTAL_BALL_PREFIX = "!crystal"
@@ -124,6 +126,9 @@ class RolePlayStream:
         gpu_index = self.argsDict.get('gpu', LlamaUtils.GPU_INDEX)
         embedder_gpu_kwargs = LlamaUtils.build_gpu_kwargs(gpu_index, False, 'embedding', logger.info)
         generator_gpu_kwargs = LlamaUtils.build_gpu_kwargs(gpu_index, self.argsDict.get('split_gpus', False), 'generative', logger.info)
+        # Flash attention and KV cache precision for the generative model only; the embedder is tiny and keeps the
+        # library defaults. See LlamaUtils.build_context_kwargs for why these exist and what they cost.
+        generator_context_kwargs = LlamaUtils.build_context_kwargs(self.argsDict.get('flash_attn', LlamaUtils.FLASH_ATTN), self.argsDict.get('kv_cache_type', LlamaUtils.KV_CACHE_TYPE), logger.info)
 
         # Initialize the EMBEDDING model
         self.llm_embedder = Llama(
@@ -145,12 +150,29 @@ class RolePlayStream:
             n_ctx=self.argsDict['generating_max_context_tokens'], # This is the context window for the chat model
             chat_format=self.argsDict['chat_format'],  # you should usually leave this None unless you have a real need
             verbose=self.argsDict['debug'],
-            # chat_handler is often useful for proper prompt formatting with chat models,
-            # but has been removed for compatibility. Ensure your generative model
-            # is fine-tuned for conversational input without explicit chat handler.
-            **generator_gpu_kwargs
+            **generator_gpu_kwargs,
+            **generator_context_kwargs
         )
         logger.info(f"{ColoredText.GREEN_TEXT}RolePlay: Generative text model [{self.argsDict['generating_model']}] loaded with [{self.argsDict['generating_gpu_layers']}] GPU layers and a context size of [{self.argsDict['generating_max_context_tokens']}].{ColoredText.END_TEXT}")
+
+        # Take over prompt formatting from llama-cpp-python so that reasoning can be switched off.
+        # See the equivalent block in role_play.py for why this is necessary; in short, the library
+        # freezes its own formatter and 'create_chat_completion()' has no '**kwargs', so a template
+        # variable like 'enable_thinking' cannot otherwise be reached. Reasoning starts OFF, which
+        # matters more here than in the standalone script - a spoken session pays for every token
+        # of deliberation in latency before the user hears a word.
+        self.thinking_supported = False
+        try:
+            ChatTemplate.install_chat_handler(self.llm_generator, thinking=False)
+            self.thinking_supported = ChatTemplate.supports_thinking(self.llm_generator)
+            architecture = ChatTemplate.model_architecture(self.llm_generator)
+            logger.info(f"{ColoredText.GREEN_TEXT}RolePlay: Using the model's embedded chat template (architecture [{architecture}]); reasoning is {'available and currently suppressed' if self.thinking_supported else 'not applicable to this model'}.{ColoredText.END_TEXT}")
+        except ValueError as e:
+            logger.warning(f"{ColoredText.YELLOW_TEXT}RolePlay: {e} Falling back to llama-cpp-python's own prompt formatting.{ColoredText.END_TEXT}")
+
+        # Stop strings that end an assistant turn for THIS architecture; merged with the
+        # conversational stops at generation time rather than replacing them.
+        self.architecture_stops = ChatTemplate.stop_tokens(self.llm_generator)
 
         if self.argsDict['encrypted']:
             self.passphrase = getpass.getpass("🔑 Enter conversation passphrase: ")
@@ -441,6 +463,10 @@ class RolePlayStream:
                 # if there is a spoken response
                 think_used = LlamaUtils.report_keyword(user_input, self.SPEECH_THINK_PREFIX)
 
+                # A spoken session never reveals reasoning - there is nothing sensible to do with
+                # deliberation in a voice pipeline except wait longer to hear the answer.
+                reason_used = False
+
                 ignore_user_in_vector_db = False
                 ignore_assistant_in_vector_db = False
                 crystal_ball = False
@@ -452,6 +478,7 @@ class RolePlayStream:
                 # if there is a text response
                 vector_test, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.VECTOR_TEST_PREFIX)
                 think_used, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.THINK_PREFIX)
+                reason_used, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.REASON_PREFIX)
                 crystal_ball, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.CRYSTAL_BALL_PREFIX)
                 chat_history_review, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.SEE_PAST_PREFIX)
                 date_given, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.DATETIME_PREFIX)
@@ -505,7 +532,7 @@ class RolePlayStream:
                     'success': True,
                     'type': 'system_message',
                     "response": '',
-                    "message": self.get_help(),
+                    "message": self.get_help(self.argsDict.get('response_token_presets')),
                     "elapsed_time": time.time() - start_time,
                     'file_size': 0
                 }
@@ -517,6 +544,10 @@ class RolePlayStream:
 
             # determine the max response tokens, IF it changed
             used_max_response_tokens, user_input = self.adjust_response_tokens(user_input, self.argsDict['max_response_tokens'])
+
+            # Room for the model's deliberation, which shares max_tokens with the answer - see the matching note in
+            # role_play.py. Added after the length prefix's hidden instruction, so it never asks for a longer answer.
+            used_max_response_tokens += LlamaUtils.turn_token_allowance(reason_used, self.thinking_supported, mySessionDict['system_tokens'], used_max_response_tokens, mySessionDict['max_useable_tokens'], self.argsDict)
 
             # Add the system tokens and the tokens allotted for the current assistant response
             used_tokens = mySessionDict['system_tokens'] + used_max_response_tokens
@@ -698,6 +729,15 @@ class RolePlayStream:
                     else:
                         local_stop = ["[INST]", "<|im_end|>", "<|start_header_id|>", "User:", "Assistant:"]
 
+                    # The hard-coded stops above cover ChatML and Llama-3 only. Gemma 4 ends a turn
+                    # with '<turn|>' and Muse Glimmer with '<|eot|>', neither of which appears above,
+                    # so without these the model would run on past the end of its own reply.
+                    local_stop = local_stop + [stop for stop in self.architecture_stops if stop not in local_stop]
+
+                    # Conversational stops would fire inside a reasoning model's deliberation and end the turn empty, so
+                    # for such models they are applied to the stripped answer instead. See ChatTemplate.split_stops.
+                    generation_stop, answer_stop = ChatTemplate.split_stops(self.llm_generator, local_stop)
+
                     logger.info(f"{ColoredText.BLUE_TEXT}Sending to the LLM generator for session_id {mySessionDict['session_id']} ... used_tokens: {used_tokens} generating_max_context_tokens: {self.argsDict['generating_max_context_tokens']} used_max_response_tokens: {used_max_response_tokens}{ColoredText.END_TEXT}")
 
                     with self.generating_gpu_lock:
@@ -706,16 +746,29 @@ class RolePlayStream:
                         if self.models_released:
                             raise RuntimeError("the models have been released - the server is shutting down")
 
+                        # Set INSIDE the lock. Reasoning mode is a property of the shared generator,
+                        # not of a session, so setting it outside would let one session's '!reason'
+                        # turn leak into whichever other session happened to generate next.
+                        ChatTemplate.set_thinking(self.llm_generator, reason_used)
+
                         llama_response = self.llm_generator.create_chat_completion(
                             messages=messages_for_llm,
                             max_tokens=used_max_response_tokens,
                             stream=False,
                             repeat_penalty = self.argsDict['repeat_penalty'],
-                            stop=local_stop
+                            stop=generation_stop
                         )
 
                     # Get the full response content directly
                     full_response_content = llama_response["choices"][0]["message"]["content"]
+
+                    # Strip any reasoning before the response goes any further, so that deliberation
+                    # never reaches the caller, the vector database or the chat history - where it
+                    # would be replayed to the model as though it were part of the conversation.
+                    # 'thinking' is passed explicitly rather than read back from the model: the lock has been
+                    # released by now, so another session may already have changed the generator's setting.
+                    full_response_content = ChatTemplate.strip_reasoning(full_response_content, self.llm_generator, thinking=reason_used)
+                    full_response_content = ChatTemplate.truncate_at_stops(full_response_content, answer_stop)
 
                     # if there was a response AND we didnt look into the crystal ball (i.e. we want to save this interaction), continue
                     if full_response_content.strip() and not crystal_ball:
@@ -832,23 +885,26 @@ class RolePlayStream:
 
         #### #figure out if we want to override the base of max_response_tokens
         override_tokens = 0
+        # The budget behind each length prefix comes from the system config's 'response_token_presets', so it can differ
+        # per model; any preset the config leaves out keeps LlamaUtils.RESPONSE_TOKEN_PRESETS.
+        presets = self.argsDict.get('response_token_presets', LlamaUtils.RESPONSE_TOKEN_PRESETS)
         max_response_override, local_text = LlamaUtils.report_and_remove_keyword(local_text, RolePlayStream.VERYSHORT_PREFIX)
-        if max_response_override: override_tokens = 32
+        if max_response_override: override_tokens = presets['veryshort']
 
         max_response_override, local_text = LlamaUtils.report_and_remove_keyword(local_text, RolePlayStream.SHORT_PREFIX)
-        if max_response_override: override_tokens = 64
+        if max_response_override: override_tokens = presets['short']
 
         max_response_override, local_text = LlamaUtils.report_and_remove_keyword(local_text, RolePlayStream.MEDIUM_PREFIX)
-        if max_response_override: override_tokens = 128
+        if max_response_override: override_tokens = presets['medium']
 
         max_response_override, local_text = LlamaUtils.report_and_remove_keyword(local_text, RolePlayStream.NORMAL_PREFIX)
-        if max_response_override: override_tokens = 256
+        if max_response_override: override_tokens = presets['normal']
 
         max_response_override, local_text = LlamaUtils.report_and_remove_keyword(local_text, RolePlayStream.LONG_PREFIX)
-        if max_response_override: override_tokens = 512
+        if max_response_override: override_tokens = presets['long']
 
         max_response_override, local_text = LlamaUtils.report_and_remove_keyword(local_text, RolePlayStream.VERYLONG_PREFIX)
-        if max_response_override: override_tokens = 1024
+        if max_response_override: override_tokens = presets['verylong']
 
         # if this was never set - or it was set to max_response_tokens - take the default
         if override_tokens == 0 or (override_tokens == max_response_tokens):
@@ -1012,19 +1068,27 @@ class RolePlayStream:
         logger.info(f"{ColoredText.BLUE_TEXT}RolePlayStream.cleanup: Generative and embedding models released.{ColoredText.END_TEXT}")
 
     @staticmethod
-    def get_help() -> str:
+    def get_help(presets: dict = None) -> str:
+        """
+        Lists the commands. The length-prefix budgets shown are the ones actually in force, since a system config may
+        override them.
+
+        :param presets: The run's 'response_token_presets'; LlamaUtils.RESPONSE_TOKEN_PRESETS if not given.
+        """
+        presets = presets or LlamaUtils.RESPONSE_TOKEN_PRESETS
         retVal = ''
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.SAVE_PREFIX}' to save the current session.{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.LOAD_PREFIX}' to reload the last saved session (this will clear current unsaved progress).{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.SEE_PAST_PREFIX}' to see the chat history that WOULD have been sent to the LLM; note it does not and is just for you to review it.{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.STRIKE_PREFIX}' to remove the last chat request/response from the chat history and vector database.{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.CRYSTAL_BALL_PREFIX}' followed by your prompt to see what the LLM would say to a zany question or comment; the request nor response are saved in the chat history, so after the LLM initially responds, it will be like you never asked the question. Careful, though, it does consume a Morty!{ColoredText.END_TEXT}\n"
+        retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.REASON_PREFIX}' followed by your prompt to let the model reason out loud for that one turn. Reasoning is normally suppressed, as it costs both time and context to generate text you never see. The deliberation is never saved to the chat history or the vector database. The turn gets extra token room for the deliberation on top of the normal response budget, so there is no need to add a length prefix - and better not to, since those ask the model to fill the whole budget and it will spend it planning.{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.THINK_PREFIX}' followed by your prompt to get the LLM to really dig deep in its memory; what this really means is the 'long term' chat history of the vector database will have ample amount of room to try to find the answer from previous conversations. This is useful if you are asking for information that is well outside of the context history window. Note that if the entire chat history fits within the context, the database will not be used (as there is no need, its all there).{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.DATETIME_PREFIX}' to print the current datetime in a line (something like 'For reference, the datetime is YYYY-MM-DD HH:II:SS); useful for tracking dates.{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.VECTOR_TEST_PREFIX}' followed by your prompt tests the vector database; it will show you everything that would have been selected from the vector database. This does not contact the LLM.{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.IGNORE_ME_PREFIX}' followed by your prompt alters the items found matching in the vector database by ignoring the user input / p[rompt / request via replacing it with a generic 'Update me.'; useful if you want to save on tokens while having the assistant use its previous responses (good for having it remember parts of a roleplay world it created).{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.IGNORE_YOU_PREFIX}' followed by your prompt alters the items found matching in the vector database by ignoring the assistant response via replacing it with a generic 'Fascinating.'; useful if you want the assistant to focus on what you said and ignore its response (for example, if you use it for journaling). Also useful if the assistant is chatty and fills responses with nonsense filler or questions, and you want it to focus on what you said.{ColoredText.END_TEXT}\n"
-        retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.VERYSHORT_PREFIX}', '{RolePlayStream.SHORT_PREFIX}', '{RolePlayStream.MEDIUM_PREFIX}', '{RolePlayStream.NORMAL_PREFIX}', '{RolePlayStream.LONG_PREFIX}', or '{RolePlayStream.VERYLONG_PREFIX}'  followed by your prompt to temporarily set the max-response-tokens. Values: '{RolePlayStream.VERYSHORT_PREFIX}'=32, '{RolePlayStream.SHORT_PREFIX}'=64, '{RolePlayStream.MEDIUM_PREFIX}'=128, '{RolePlayStream.NORMAL_PREFIX}'=256, '{RolePlayStream.LONG_PREFIX}'=512, '{RolePlayStream.VERYLONG_PREFIX}'=1024. Omit these to use the default.{ColoredText.END_TEXT}\n"
+        retVal += f"{ColoredText.BLUE_TEXT}* Type '{RolePlayStream.VERYSHORT_PREFIX}', '{RolePlayStream.SHORT_PREFIX}', '{RolePlayStream.MEDIUM_PREFIX}', '{RolePlayStream.NORMAL_PREFIX}', '{RolePlayStream.LONG_PREFIX}', or '{RolePlayStream.VERYLONG_PREFIX}'  followed by your prompt to temporarily set the max-response-tokens. Values: '{RolePlayStream.VERYSHORT_PREFIX}'={presets['veryshort']}, '{RolePlayStream.SHORT_PREFIX}'={presets['short']}, '{RolePlayStream.MEDIUM_PREFIX}'={presets['medium']}, '{RolePlayStream.NORMAL_PREFIX}'={presets['normal']}, '{RolePlayStream.LONG_PREFIX}'={presets['long']}, '{RolePlayStream.VERYLONG_PREFIX}'={presets['verylong']}. Omit these to use the default.{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Sometimes, you want to send instructions for this round of chat to the LLM, bout you dont want the instructions saved to the vector database _or_ the chat history; in those cases, wrap instructions in the '{RolePlayStream.HIDDEN_INSTRUCTION_DELIMITER}' delimiter like so: 'Tell me about Artificial intelligence{RolePlayStream.HIDDEN_INSTRUCTION_DELIMITER} , but please use no more than 50 characters{RolePlayStream.HIDDEN_INSTRUCTION_DELIMITER}.' This way the instructions will not be saved (so it wont influence future generations).{ColoredText.END_TEXT}\n"
 
         retVal += f"{ColoredText.BLUE_TEXT}* ...and, finally, type '{RolePlayStream.HELP_PREFIX}' for this menu again!{ColoredText.END_TEXT}\n"

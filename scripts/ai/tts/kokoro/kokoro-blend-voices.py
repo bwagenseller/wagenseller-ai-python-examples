@@ -1,5 +1,14 @@
 import warnings
 
+# Line editing at the prompts. Importing readline is all it takes: input() then supports the arrow keys, Home/End and
+# Ctrl-A/Ctrl-E for fixing a typo mid-line, and Up/Down to recall this session's earlier inputs. Without it the arrow
+# keys just insert escape codes such as '^[[D'. The history stays in memory only - nothing typed is written to disk.
+# Optional, because some Python builds lack the module; the script works the same without it.
+try:
+    import readline  # noqa: F401 - imported for its side effect on input()
+except ImportError:
+    pass
+
 """
 suppress warnings:
 UserWarning: dropout option adds dropout after all but last recurrent layer, so non-zero dropout expects num_layers greater than 1, but got dropout=0.2 and num_layers=1
