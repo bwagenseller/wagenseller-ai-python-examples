@@ -8,6 +8,7 @@ import numpy as np
 # CUDA_DEVICE_ORDER at import time so that '--gpu N' means the Nth card as 'nvidia-smi -L' lists it. Flip these two
 # lines and the GPU selection silently reverts to CUDA's own 'fastest first' ordering.
 from amadeo_utils.ai.llm.llama.llama_utils import LlamaUtils
+from amadeo_utils.ai.llm.llama import chat_template as ChatTemplate
 from llama_cpp import Llama
 
 from typing import Dict, Any, Optional, List, Callable
@@ -30,6 +31,7 @@ class KnowledgeBaseStream:
 
     HELP_PREFIX = "!help"
     THINK_PREFIX = "!remember"
+    REASON_PREFIX = "!reason"
     SEE_PAST_PREFIX = "!history"
     VECTOR_TEST_PREFIX = "!vectortest"
     HIDDEN_INSTRUCTION_DELIMITER = "##"
@@ -132,6 +134,28 @@ class KnowledgeBaseStream:
             **generator_context_kwargs
         )
         logger.info(f"{ColoredText.GREEN_TEXT}RolePlay: Generative text model [{self.argsDict['generating_model']}] loaded with [{self.argsDict['generating_gpu_layers']}] GPU layers and a context size of [{self.argsDict['generating_max_context_tokens']}].{ColoredText.END_TEXT}")
+
+        # Take over prompt formatting from llama-cpp-python so that reasoning can be switched off.
+        # See the equivalent block in role_play.py for why this is necessary; in short, the library freezes its own
+        # formatter and 'create_chat_completion()' has no '**kwargs', so a template variable like 'enable_thinking'
+        # cannot otherwise be reached. Reasoning starts OFF, which matters most here: left on, Qwen 3.6 spends the whole
+        # response budget deliberating and never reaches an answer, and a spoken session would pay for every token of
+        # deliberation in latency before the user hears a word. The REASON_PREFIX command turns it on for one turn.
+        #
+        # This runs before any other thread exists, and the generator is only ever touched under generating_gpu_lock
+        # afterwards, so the handler is installed once here and switched per turn inside the lock.
+        self.thinking_supported = False
+        try:
+            ChatTemplate.install_chat_handler(self.llm_generator, thinking=False)
+            self.thinking_supported = ChatTemplate.supports_thinking(self.llm_generator)
+            architecture = ChatTemplate.model_architecture(self.llm_generator)
+            logger.info(f"{ColoredText.GREEN_TEXT}KnowledgeBaseStream: Using the model's embedded chat template (architecture [{architecture}]); reasoning is {'available and currently suppressed' if self.thinking_supported else 'not applicable to this model'}.{ColoredText.END_TEXT}")
+        except ValueError as e:
+            logger.warning(f"{ColoredText.YELLOW_TEXT}KnowledgeBaseStream: {e} Falling back to llama-cpp-python's own prompt formatting.{ColoredText.END_TEXT}")
+
+        # Stop strings that end an assistant turn for THIS architecture; merged with the conversational stops at
+        # generation time rather than replacing them.
+        self.architecture_stops = ChatTemplate.stop_tokens(self.llm_generator)
 
         # Get the system tokens. This runs during construction, before the server has started and therefore before any
         # other thread exists, so it is the one place the generator is touched without generating_gpu_lock held. Taking
@@ -298,20 +322,21 @@ class KnowledgeBaseStream:
                 spoken_response = request.get('spoken_response', True) # we pay a higher penalty if this is false and we need a spoken response, rather than if we wished for a text response and got spoken response instead
 
                 retDict = self.create_session(session_id, user_id, spoken_response)
-                if retDict['spoken_response']:
-                    # Simulate a greeting, which Really we should never get to this as spoken responses cannot review a vector test, but just in case...
-                    response =self.get_response("Hello! Please use a short phrase to respond.")
-                    # BRENT This was not returning as of now - do you want it to?
-                else:
-                    response = {
-                        'success': True,
-                        'type': 'system_message',
-                        "response": '',
-                        "message": self.argsDict['system_message'],
-                        "elapsed_time": 0.0,
-                        'file_size': 0
-                    }
-                    return response, None
+                # Spoken and text sessions get the same reply: confirmation that the session exists, carrying the system
+                # message. A spoken session once tried to generate a greeting here instead, but passed get_response() a
+                # bare string where it expects the request dictionary, so it raised AttributeError and the client never got
+                # an answer to its 'create_llm_session' request. The greeting was not worth fixing: the voice pipeline
+                # ignores this reply, so the greeting would never be heard, yet it would hold the GPU and leave a
+                # synthetic exchange at the top of the session's chat history.
+                response = {
+                    'success': True,
+                    'type': 'system_message',
+                    "response": '',
+                    "message": self.argsDict['system_message'],
+                    "elapsed_time": 0.0,
+                    'file_size': 0
+                }
+                return response, None
             else:
                 if command != 'request':
                     logger.warning(f"{ColoredText.GREEN_TEXT}session_id {session_id} requested command {command} - setting to 'request'.{ColoredText.END_TEXT}")
@@ -398,6 +423,10 @@ class KnowledgeBaseStream:
                 # if there is a spoken response
                 think_used = LlamaUtils.report_keyword(user_input, self.SPEECH_THINK_PREFIX)
 
+                # A spoken session never reasons - the reply is never shown anyway, and deliberation would only make
+                # the caller wait longer to hear the answer.
+                reason_used = False
+
                 vector_test = False
                 chat_history_review = False
 
@@ -405,6 +434,7 @@ class KnowledgeBaseStream:
                 # if there is a text response
                 vector_test, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.VECTOR_TEST_PREFIX)
                 think_used, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.THINK_PREFIX)
+                reason_used, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.REASON_PREFIX)
                 chat_history_review, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.SEE_PAST_PREFIX)
 
 
@@ -419,8 +449,14 @@ class KnowledgeBaseStream:
                     'file_size': 0
                 }
 
+            # A model's deliberation comes out of the same max_tokens as its answer: room for a '!reason' turn to think
+            # ('reasoning_budget_tokens'), or for a model that thinks even when told not to (Muse Glimmer's
+            # 'suppressed_reasoning_tokens'). Without it, Muse Glimmer can spend the whole budget on hidden deliberation
+            # and never reach an answer.
+            used_max_response_tokens = self.argsDict['max_response_tokens'] + LlamaUtils.turn_token_allowance(reason_used, self.thinking_supported, self.system_tokens, self.argsDict['max_response_tokens'], self.max_useable_tokens, self.argsDict)
+
             # Add the system tokens and the tokens allotted for the current assistant response
-            used_tokens = self.system_tokens + self.argsDict['max_response_tokens']
+            used_tokens = self.system_tokens + used_max_response_tokens
 
             # Now that we have cleared out most of the prompts, we can generate the token count and embedding based off the most recent prompt
             with self.generating_gpu_lock:
@@ -541,7 +577,15 @@ class KnowledgeBaseStream:
 
                     local_stop = ["[INST]", "<|im_end|>", "<|start_header_id|>", "User:", "Assistant:"]
 
-                    logger.info(f"{ColoredText.BLUE_TEXT}Sending to the LLM generator for session_id {mySessionDict['session_id']} ... used_tokens: {used_tokens} generating_max_context_tokens: {self.argsDict['generating_max_context_tokens']} used_max_response_tokens: {self.argsDict['max_response_tokens']}{ColoredText.END_TEXT}")
+                    # The hard-coded stops above cover ChatML and Llama-3 only. Gemma 4 ends a turn with '<turn|>' and
+                    # Muse Glimmer with '<|eot|>', neither of which appears above, so add this architecture's own.
+                    local_stop = local_stop + [stop for stop in self.architecture_stops if stop not in local_stop]
+
+                    # Conversational stops would fire inside a reasoning model's deliberation and end the turn empty, so
+                    # for such models they are applied to the stripped answer instead. See ChatTemplate.split_stops.
+                    generation_stop, answer_stop = ChatTemplate.split_stops(self.llm_generator, local_stop)
+
+                    logger.info(f"{ColoredText.BLUE_TEXT}Sending to the LLM generator for session_id {mySessionDict['session_id']} ... used_tokens: {used_tokens} generating_max_context_tokens: {self.argsDict['generating_max_context_tokens']} used_max_response_tokens: {used_max_response_tokens} reasoning: {reason_used and self.thinking_supported}{ColoredText.END_TEXT}")
 
                     with self.generating_gpu_lock:
                         # Checked INSIDE the lock: cleanup() sets this while holding the same lock, so a request that
@@ -549,16 +593,29 @@ class KnowledgeBaseStream:
                         if self.models_released:
                             raise RuntimeError("the models have been released - the server is shutting down")
 
+                        # Set INSIDE the lock. Reasoning mode is a property of the shared generator, not of a session,
+                        # so setting it outside would let one session's '!reason' turn leak into whichever other session
+                        # happened to generate next.
+                        ChatTemplate.set_thinking(self.llm_generator, reason_used)
+
                         llama_response = self.llm_generator.create_chat_completion(
                             messages=messages_for_llm,
-                            max_tokens=self.argsDict['max_response_tokens'],
+                            max_tokens=used_max_response_tokens,
                             stream=False,
                             repeat_penalty = self.argsDict['repeat_penalty'],
-                            stop=local_stop
+                            stop=generation_stop
                         )
 
                     # Get the full response content directly
                     full_response_content = llama_response["choices"][0]["message"]["content"]
+
+                    # Strip any reasoning before the response goes any further, so that deliberation never reaches the
+                    # client (or a text-to-speech voice) or the chat history, where it would be replayed to the model as
+                    # though it were part of the conversation. This applies on a '!reason' turn too: the server only
+                    # ever returns the answer. 'thinking' is passed explicitly rather than read back from the model: the
+                    # lock has been released by now, so another session may already have changed the generator's setting.
+                    full_response_content = ChatTemplate.strip_reasoning(full_response_content, self.llm_generator, thinking=reason_used)
+                    full_response_content = ChatTemplate.truncate_at_stops(full_response_content, answer_stop)
 
                     # if there was a response AND we didnt look into the crystal ball (i.e. we want to save this interaction), continue
                     if full_response_content.strip():
@@ -775,6 +832,7 @@ class KnowledgeBaseStream:
         retVal = ''
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{KnowledgeBaseStream.SEE_PAST_PREFIX}' to see the chat history that WOULD have been sent to the LLM; note it does not and is just for you to review it.{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{KnowledgeBaseStream.THINK_PREFIX}' followed by your prompt to get the LLM to really dig deep in its memory; what this really means is the 'long term' chat history of the vector database will have ample amount of room to try to find the answer from previous conversations. This is useful if you are asking for information that is well outside of the context history window. Note that if the entire chat history fits within the context, the database will not be used (as there is no need, its all there).{ColoredText.END_TEXT}\n"
+        retVal += f"{ColoredText.BLUE_TEXT}* Type '{KnowledgeBaseStream.REASON_PREFIX}' followed by your prompt to let the model reason before it answers, for that one turn - useful for a question that needs several knowledge base entries combined. Only the answer is returned; the deliberation is discarded, and never saved to the chat history. Expect a slower reply, and other sessions wait while it generates. Not to be confused with '{KnowledgeBaseStream.THINK_PREFIX}', which searches the knowledge base more widely but does not change how the model answers; the two can be combined. Spoken sessions never reason.{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Type '{KnowledgeBaseStream.VECTOR_TEST_PREFIX}' followed by your prompt tests the vector database; it will show you everything that would have been selected from the vector database. This does not contact the LLM.{ColoredText.END_TEXT}\n"
         retVal += f"{ColoredText.BLUE_TEXT}* Sometimes, you want to send instructions for this round of chat to the LLM, bout you dont want the instructions saved to the vector database _or_ the chat history; in those cases, wrap instructions in the '{KnowledgeBaseStream.HIDDEN_INSTRUCTION_DELIMITER}' delimiter like so: 'Tell me about Artificial intelligence{KnowledgeBaseStream.HIDDEN_INSTRUCTION_DELIMITER} , but please use no more than 50 characters{KnowledgeBaseStream.HIDDEN_INSTRUCTION_DELIMITER}.' This way the instructions will not be saved (so it wont influence future generations).{ColoredText.END_TEXT}\n"
 

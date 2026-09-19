@@ -237,7 +237,15 @@ def _harmony_messages(text: str):
                 # A headerless segment after '<|start|>' is a malformed fragment: deliberation, never a reply.
                 deliberation.append(_HARMONY_CONTROL.sub("", segment))
             continue
-        body = _HARMONY_CONTROL.sub("", segment[header.end():])
+        # A header can arrive stacked on itself - ' to=user<|message|>to=user<|message|>...' - which Muse Glimmer
+        # produced once its conversation history already held raw headers it could imitate (CS-18). Consume every
+        # further header at the start of the body; the first one names the recipient.
+        body = segment[header.end():]
+        stacked = _HARMONY_HEADER.match(body)
+        while stacked is not None and stacked.end() > 0:
+            body = body[stacked.end():]
+            stacked = _HARMONY_HEADER.match(body)
+        body = _HARMONY_CONTROL.sub("", body)
         recipient = header.group("to")
         if recipient == "user":
             to_user.append(body)
@@ -772,6 +780,15 @@ class ReasoningStreamFilter:
             head = stable.lstrip()
             if "<|message|>" not in stable and ("to=".startswith(head) or head.startswith("to=")):
                 stable = ""
+            # The same at the start of a message body, where a header can arrive stacked on the one just completed
+            # (' to=user<|message|>to=us...'; see _harmony_messages). Held until it either completes or turns out to
+            # be prose.
+            body_at = stable.rfind("<|message|>")
+            if body_at != -1:
+                body_at += len("<|message|>")
+                body = stable[body_at:].lstrip()
+                if body and ("to=".startswith(body) or (body.startswith("to=") and "<|message|>" not in body)):
+                    stable = stable[:body_at]
         return stable
 
     def _hold_stop_prefix(self, text: str) -> str:

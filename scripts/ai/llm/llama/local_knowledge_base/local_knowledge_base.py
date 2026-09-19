@@ -16,6 +16,7 @@ except ImportError:
 # CUDA_DEVICE_ORDER at import time so that '--gpu N' means the Nth card as 'nvidia-smi -L' lists it. Flip these two
 # lines and the GPU selection silently reverts to CUDA's own 'fastest first' ordering.
 from amadeo_utils.ai.llm.llama.llama_utils import LlamaUtils
+from amadeo_utils.ai.llm.llama import chat_template as ChatTemplate
 from llama_cpp import Llama
 
 from amadeo_utils.ai.llm.vector_database.VectorDB import VectorDB
@@ -41,6 +42,7 @@ class KnowledgeBase:
     QUIT_PREFIX = "!quit"
     EXIT_PREFIX = "!exit"
     THINK_PREFIX = "!think"
+    REASON_PREFIX = "!reason"
     SEE_PAST_PREFIX = "!history"
     VECTOR_TEST_PREFIX = "!vectortest"
     HIDDEN_INSTRUCTION_DELIMITER = "##"
@@ -130,6 +132,30 @@ class KnowledgeBase:
         )
         print(f"{ColoredText.GREEN_TEXT}KnowledgeBase: Generative text model [{self.argsDict['generating_model']}] loaded with [{self.argsDict['generating_gpu_layers']}] GPU layers and a context size of [{self.argsDict['generating_max_context_tokens']}].{ColoredText.END_TEXT}")
 
+        # Take over prompt formatting from llama-cpp-python so that reasoning can be switched off.
+        #
+        # The library builds its own formatter per model and freezes it, and 'create_chat_completion()' has no
+        # '**kwargs', so there is no supported way to reach a template variable like 'enable_thinking' through it.
+        # Installing our own handler keeps the model's embedded template - the prompt format is unchanged - while
+        # letting the reasoning variables be reassigned between turns. Reasoning starts OFF: left on, a model such as
+        # Qwen 3.6 spends the whole response budget deliberating and never reaches an answer. The REASON_PREFIX command
+        # turns it back on for a single turn.
+        #
+        # A GGUF without an embedded template has nothing to install, in which case we leave the library's own handling
+        # alone and simply have no reasoning control.
+        self.thinking_supported = False
+        try:
+            ChatTemplate.install_chat_handler(self.llm_generator, thinking=False)
+            self.thinking_supported = ChatTemplate.supports_thinking(self.llm_generator)
+            architecture = ChatTemplate.model_architecture(self.llm_generator)
+            print(f"{ColoredText.GREEN_TEXT}KnowledgeBase: Using the model's embedded chat template (architecture [{architecture}]); reasoning is {'available and currently suppressed' if self.thinking_supported else 'not applicable to this model'}.{ColoredText.END_TEXT}")
+        except ValueError as e:
+            print(f"{ColoredText.YELLOW_TEXT}KnowledgeBase: {e} Falling back to llama-cpp-python's own prompt formatting.{ColoredText.END_TEXT}")
+
+        # Stop strings that end an assistant turn for THIS architecture. Merged with the conversational stops at
+        # generation time rather than replacing them.
+        self.architecture_stops = ChatTemplate.stop_tokens(self.llm_generator)
+
         # the locks really are not needed here, as the is the only script running this and there is no threading - however, VectorDB uses locks as other scripts DO call that in a threaded environment, so we need them for that purpose
         self.generating_gpu_lock = threading.Lock()
         self.embedding_gpu_lock = threading.Lock()
@@ -149,10 +175,17 @@ class KnowledgeBase:
         # determine if the user wants to do anything special
         vector_test, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.VECTOR_TEST_PREFIX)
         think_used, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.THINK_PREFIX)
+        reason_used, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.REASON_PREFIX)
         chat_history_review, user_input = LlamaUtils.report_and_remove_keyword(user_input, self.SEE_PAST_PREFIX)
 
         # determine the max response tokens, IF it changed
         used_max_response_tokens = self.argsDict['max_response_tokens']
+
+        # A model's deliberation comes out of the same max_tokens as its answer: room for a '!reason' turn to think
+        # ('reasoning_budget_tokens'), or for a model that thinks even when told not to (Muse Glimmer's
+        # 'suppressed_reasoning_tokens'). Without it, Muse Glimmer can spend the whole budget on hidden deliberation
+        # and never reach an answer.
+        used_max_response_tokens += LlamaUtils.turn_token_allowance(reason_used, self.thinking_supported, self.system_tokens, used_max_response_tokens, self.max_useable_tokens, self.argsDict)
 
         # Add the system tokens and the tokens allotted for the current assistant response
         used_tokens = self.system_tokens + used_max_response_tokens
@@ -238,22 +271,51 @@ class KnowledgeBase:
 
                 local_stop = ["[INST]", "<|im_end|>", "<|start_header_id|>", "User:", "Assistant:"]
 
+                # The hard-coded stops above cover ChatML and Llama-3 only. Gemma 4 ends a turn with '<turn|>' and
+                # Muse Glimmer with '<|eot|>', neither of which appears above, so add this architecture's own.
+                local_stop = local_stop + [stop for stop in self.architecture_stops if stop not in local_stop]
+
+                # For a model with a reasoning mode, the conversational stops ('User:', 'Assistant:') must not reach
+                # llama.cpp: they would fire inside the model's reasoning notes, where such markers are common, and end
+                # the turn before any answer exists. They are enforced on the answer instead - live by the display
+                # filter below, and on the stored text after stripping. Other models are unaffected.
+                generation_stop, answer_stop = ChatTemplate.split_stops(self.llm_generator, local_stop)
+
+                # Reveal the model's reasoning for this turn only, if asked for.
+                ChatTemplate.set_thinking(self.llm_generator, reason_used)
+                if reason_used and self.thinking_supported:
+                    print(f"{ColoredText.BLUE_TEXT}Reasoning is enabled for this turn; the deliberation below is shown but will not be saved.{ColoredText.END_TEXT}")
+
                 if self.argsDict['debug']: print(f"{ColoredText.BLUE_TEXT}Sending to the LLM generator... used_tokens: {used_tokens} generating_max_context_tokens: {self.argsDict['generating_max_context_tokens']} used_max_response_tokens: {used_max_response_tokens} generating_gpu_layers: {self.argsDict['generating_gpu_layers']} {ColoredText.END_TEXT}")
 
                 response_stream = self.llm_generator.create_chat_completion( # Using llm_generator here
                     messages=messages_for_llm,
                     max_tokens=used_max_response_tokens,
                     stream=True,
-                    stop=local_stop
+                    stop=generation_stop
                 )
+
+                # Filter what reaches the screen, not what is kept. Some models deliberate no matter what they are told
+                # (Muse Glimmer's reasoning control is only a 'Reasoning strength' instruction), and without this their
+                # deliberation and protocol headers would stream live on every turn. On a '!reason' turn the filter
+                # shows the deliberation, then the reply, with the markers removed.
+                display_filter = ChatTemplate.ReasoningStreamFilter(self.llm_generator, thinking=reason_used, answer_stops=answer_stop)
 
                 full_response_content = ""
                 for chunk in response_stream:
                     if "content" in chunk["choices"][0]["delta"]:
                         content = chunk["choices"][0]["delta"]["content"]
-                        print(content, end="", flush=True)
+                        print(display_filter.feed(content), end="", flush=True)
                         full_response_content += content
-                print() # Ensure a new line after the streamed response
+                        if display_filter.finished:
+                            break   # an answer stop was reached; leaving the loop ends generation, as a stop string would
+                print(display_filter.flush()) # release anything held back, and end the line
+
+                # Strip any reasoning before the response goes any further, so that the deliberation never reaches the
+                # chat history, where it would be fed back to the model as though it were part of the conversation.
+                # It costs nothing when there is nothing to remove.
+                full_response_content = ChatTemplate.strip_reasoning(full_response_content, self.llm_generator, thinking=reason_used)
+                full_response_content = ChatTemplate.truncate_at_stops(full_response_content, answer_stop)
 
                 # if there was a response, continue
                 if full_response_content.strip():
@@ -375,6 +437,7 @@ class KnowledgeBase:
         print(f"{ColoredText.BLUE_TEXT}* Type '{KnowledgeBase.EXIT_PREFIX}' or '{KnowledgeBase.QUIT_PREFIX}' to end the conversation.{ColoredText.END_TEXT}")
         print(f"{ColoredText.BLUE_TEXT}* Type '{KnowledgeBase.SEE_PAST_PREFIX}' to see the chat history that WOULD have been sent to the LLM; note it does not and is just for you to review it.{ColoredText.END_TEXT}")
         print(f"{ColoredText.BLUE_TEXT}* Type '{KnowledgeBase.THINK_PREFIX}' followed by your prompt to get the LLM to really dig deep in its memory; what this really means is the 'long term' chat history of the vector database will have ample amount of room to try to find the answer from previous conversations. This is useful if you are asking for information that is well outside of the context history window. Note that if the entire chat history fits within the context, the database will not be used (as there is no need, its all there).{ColoredText.END_TEXT}")
+        print(f"{ColoredText.BLUE_TEXT}* Type '{KnowledgeBase.REASON_PREFIX}' followed by your prompt to let the model reason out loud for that one turn, which can help with a question that needs several knowledge base entries combined. Reasoning is normally suppressed, as it costs time and context to generate text you never see. The deliberation is printed but is never saved to the chat history. Not to be confused with '{KnowledgeBase.THINK_PREFIX}', which searches the knowledge base more widely but does not change how the model answers; the two can be combined.{ColoredText.END_TEXT}")
         print(f"{ColoredText.BLUE_TEXT}* Type '{KnowledgeBase.VECTOR_TEST_PREFIX}' followed by your prompt tests the vector database; it will show you everything that would have been selected from the vector database. This does not contact the LLM.{ColoredText.END_TEXT}")
         print(f"{ColoredText.BLUE_TEXT}* Sometimes, you want to send instructions for this round of chat to the LLM, bout you dont want the instructions saved to the vector database _or_ the chat history; in those cases, wrap instructions in the '{KnowledgeBase.HIDDEN_INSTRUCTION_DELIMITER}' delimiter like so: 'Tell me about Artificial intelligence{KnowledgeBase.HIDDEN_INSTRUCTION_DELIMITER} , but please use no more than 50 characters{KnowledgeBase.HIDDEN_INSTRUCTION_DELIMITER}.' This way the instructions will not be saved (so it wont influence future generations).{ColoredText.END_TEXT}")
 

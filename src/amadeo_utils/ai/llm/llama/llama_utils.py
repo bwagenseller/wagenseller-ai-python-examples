@@ -965,6 +965,12 @@ class LlamaUtils:
                     argDict['split_gpus'] = config_dict.get('split_gpus', False)
                     argDict['flash_attn'] = config_dict.get('flash_attn', LlamaUtils.FLASH_ATTN)
                     argDict['kv_cache_type'] = config_dict.get('kv_cache_type', LlamaUtils.KV_CACHE_TYPE)
+                    # Deliberation allowances for reasoning models (CS-18). resolve_token_count raises ValueError rather
+                    # than KeyError/TypeError on purpose: the except below would otherwise swallow a bad value and fall
+                    # back to the command-line defaults - the default MODEL included. The knowledge base has no length
+                    # prefixes, so 'response_token_presets' does not apply here.
+                    argDict['reasoning_budget_tokens'] = LlamaUtils.resolve_token_count(config_dict.get('reasoning_budget_tokens', LlamaUtils.REASONING_BUDGET_TOKENS), 'reasoning_budget_tokens')
+                    argDict['suppressed_reasoning_tokens'] = LlamaUtils.resolve_token_count(config_dict.get('suppressed_reasoning_tokens', LlamaUtils.SUPPRESSED_REASONING_TOKENS), 'suppressed_reasoning_tokens')
 
                     log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_args_dict_knowledge_base_server: Config loaded from JSON file {json_config_file}; system prompt file is '{argDict['system_prompt_file']}'.{ColoredText.END_TEXT}")
                     use_default_arg_config = False
@@ -1008,6 +1014,8 @@ class LlamaUtils:
                 argDict['split_gpus'] = args.split_gpus
                 argDict['flash_attn'] = args.flash_attn
                 argDict['kv_cache_type'] = args.kv_cache_type
+                argDict['reasoning_budget_tokens'] = LlamaUtils.resolve_token_count(args.reasoning_budget_tokens, 'reasoning_budget_tokens')
+                argDict['suppressed_reasoning_tokens'] = LlamaUtils.resolve_token_count(args.suppressed_reasoning_tokens, 'suppressed_reasoning_tokens')
 
                 log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_args_dict_knowledge_base_server: Config loaded from args / defaults; system prompt file is '{argDict['system_prompt_file']}'.{ColoredText.END_TEXT}")
 
@@ -1180,9 +1188,12 @@ class LlamaUtils:
             'split_gpus': bool,
             'flash_attn': bool,
             'kv_cache_type': str,
-            'response_token_presets': dict,
-            'reasoning_budget_tokens': int,
-            'suppressed_reasoning_tokens': int,
+            # The token settings are typed 'object' so the scraper never rejects them: a wrong type would raise TypeError,
+            # which the loader catches and answers by falling back to the defaults - the default MODEL included. Their
+            # own validators (resolve_response_token_presets / resolve_token_count) raise ValueError instead.
+            'response_token_presets': object,
+            'reasoning_budget_tokens': object,
+            'suppressed_reasoning_tokens': object,
             'repeat_penalty': float
         }
 
@@ -1343,9 +1354,12 @@ class LlamaUtils:
             'split_gpus': bool,
             'flash_attn': bool,
             'kv_cache_type': str,
-            'response_token_presets': dict,
-            'reasoning_budget_tokens': int,
-            'suppressed_reasoning_tokens': int
+            # The token settings are typed 'object' so the scraper never rejects them: a wrong type would raise TypeError,
+            # which the loader catches and answers by falling back to the defaults - the default MODEL included. Their
+            # own validators (resolve_response_token_presets / resolve_token_count) raise ValueError instead.
+            'response_token_presets': object,
+            'reasoning_budget_tokens': object,
+            'suppressed_reasoning_tokens': object
         }
 
         return LlamaUtils.scrape_json_config(filepath, required_fields, optional_fields)
@@ -1365,7 +1379,8 @@ class LlamaUtils:
 
         Returns:
             dict: A dictionary containing the scraped configuration fields. All fields are required except
-                  'model_type', 'chat_format', 'debug', 'gpu', 'split_gpus', 'flash_attn', and 'kv_cache_type'. An example of a JSON doc:
+                  'model_type', 'chat_format', 'debug', 'gpu', 'split_gpus', 'flash_attn', 'kv_cache_type',
+                  'reasoning_budget_tokens', and 'suppressed_reasoning_tokens'. An example of a JSON doc:
             {
                 "host": "127.0.0.1",
                 "port": 65450,
@@ -1384,6 +1399,8 @@ class LlamaUtils:
                 "split_gpus": false,
                 "flash_attn": false,
                 "kv_cache_type": "f16",
+                "reasoning_budget_tokens": 2048,
+                "suppressed_reasoning_tokens": 0,
                 "gpu_layers": 57,
                 "embedding_gpu_layers": -1,
                 "max_context_tokens": 4096,
@@ -1437,7 +1454,8 @@ class LlamaUtils:
 
         # Optional fields with their types; if these are absent, the caller falls back to the class defaults.
         # 'gpu' and 'split_gpus' are optional so that a server config written before GPU selection existed still loads;
-        # 'flash_attn' and 'kv_cache_type' likewise, for configs written before they existed (CS-17).
+        # 'flash_attn' and 'kv_cache_type' likewise, for configs written before they existed (CS-17), and the two
+        # reasoning allowances for configs written before CS-18.
         optional_fields = {
             'model_type': str,
             'chat_format': (str, type(None)),  # 'chat_format' is usually left null so llama.cpp can work it out itself
@@ -1445,7 +1463,12 @@ class LlamaUtils:
             'gpu': int,
             'split_gpus': bool,
             'flash_attn': bool,
-            'kv_cache_type': str
+            'kv_cache_type': str,
+            # The token settings are typed 'object' so the scraper never rejects them: a wrong type would raise TypeError,
+            # which the loader catches and answers by falling back to the defaults - the default MODEL included. Their
+            # own validators (resolve_response_token_presets / resolve_token_count) raise ValueError instead.
+            'reasoning_budget_tokens': object,
+            'suppressed_reasoning_tokens': object
         }
 
         return LlamaUtils.scrape_json_config(filepath, required_fields, optional_fields)

@@ -364,19 +364,21 @@ class RolePlayStream:
                 load_previous = request.get('load_previous', True)
 
                 retDict = self.create_session(session_id, user_id, player_name, system_prompt_id, spoken_response, continuous_save, load_previous)
-                if retDict['spoken_response']:
-                    # Simulate a greeting, which Really we should never get to this as spoken responses cannot review a vector test, but just in case...
-                    response =self.get_response("Hello! Please use a short phrase to respond.")
-                else:
-                    response = {
-                        'success': True,
-                        'type': 'system_message',
-                        "response": '',
-                        "message": retDict['system_message'],
-                        "elapsed_time": 0.0,
-                        'file_size': 0
-                    }
-                    return response, None
+                # Spoken and text sessions get the same reply: confirmation that the session exists, carrying the system
+                # message. A spoken session once tried to generate a greeting here instead, but passed get_response() a
+                # bare string where it expects the request dictionary, so it raised AttributeError and the client never got
+                # an answer to its 'create_llm_session' request. The greeting was not worth fixing: the voice pipeline
+                # ignores this reply, so the greeting would never be heard, yet it would hold the GPU and leave a
+                # synthetic exchange at the top of the session's chat history.
+                response = {
+                    'success': True,
+                    'type': 'system_message',
+                    "response": '',
+                    "message": retDict['system_message'],
+                    "elapsed_time": 0.0,
+                    'file_size': 0
+                }
+                return response, None
             else:
                 if command != 'request':
                     logger.warning(f"{ColoredText.GREEN_TEXT}session_id {session_id} requested command {command} - setting to 'request'.{ColoredText.END_TEXT}")
