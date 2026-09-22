@@ -1,15 +1,14 @@
 import os
-import sys
 import logging
 import getpass
 
-# IMPORTANT: llama_utils MUST be imported before llama_cpp. Importing llama_cpp loads the llama.cpp shared library,
-# which registers its GGML CUDA backend and pins the device ordering for the life of the process; llama_utils sets
-# CUDA_DEVICE_ORDER at import time so that '--gpu N' means the Nth card as 'nvidia-smi -L' lists it. Flip these two
-# lines and the GPU selection silently reverts to CUDA's own 'fastest first' ordering.
+# IMPORTANT: llama_utils MUST be imported before anything that pulls in llama_cpp - which now includes StreamBase,
+# since the base class loads the models. Importing llama_cpp loads the llama.cpp shared library, which registers its
+# GGML CUDA backend and pins the device ordering for the life of the process; llama_utils sets CUDA_DEVICE_ORDER at
+# import time so that '--gpu N' means the Nth card as 'nvidia-smi -L' lists it. Reorder these lines and the GPU
+# selection silently reverts to CUDA's own 'fastest first' ordering.
 from amadeo_utils.ai.llm.llama.llama_utils import LlamaUtils
-from amadeo_utils.ai.llm.llama import chat_template as ChatTemplate
-from llama_cpp import Llama
+from amadeo_utils.ai.llm.llama.StreamBase import StreamBase
 
 from typing import Dict, Any, Optional
 from amadeo_utils.ai.llm.vector_database.VectorDB import VectorDB
@@ -17,7 +16,6 @@ from amadeo_utils.colored_text import ColoredText
 import threading
 from datetime import datetime
 import time
-import gc
 
 """
 This is an implementation of Llama.cpp. It was primarily built for responding from a server (handle_client_request acts as a callback function for a larger server script), but you could use it independently if you really wanted to as well, although it would be a bit clunky. 
@@ -27,7 +25,7 @@ This is an implementation of Llama.cpp. It was primarily built for responding fr
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
 logger = logging.getLogger(__name__)
 
-class RolePlayStream:
+class RolePlayStream(StreamBase):
 
     HOST = '127.0.0.1'
     PORT = 65440
@@ -76,109 +74,20 @@ class RolePlayStream:
         "Mount Everest is the Earth's highest mountain above sea level, located in the Himalayas."
     ]
 
-    #####################################################################################################################################################################################################################################################################
-    """
-    Constructor for RolePlayStream
-    """
-    def __init__(self, argsDict: dict):
-        self.argsDict = argsDict
-        self.sessions = {}
+    def post_model_init(self):
+        """
+        Collects the conversation passphrase, if this user's chat logs are encrypted.
 
-        # ---------------------------------------------------------------------------------------- Locking, in one place
-        #
-        # There are four kinds of lock here, and they must always be acquired in this order. Acquiring them in any other
-        # order between two threads is how you deadlock a server:
-        #
-        #   1. self.sessions_lock        - guards the STRUCTURE of self.sessions / self.session_locks (which sessions
-        #                                  exist). Held only for the handful of instructions it takes to look something
-        #                                  up or swap it out; never held across model work or across a session lock.
-        #   2. self.session_locks[id]    - guards the CONTENTS of one session's dictionary. Held for the length of one
-        #                                  request, which can be tens of seconds.
-        #   3. self.generating_gpu_lock  - guards self.llm_generator. One generation at a time, machine wide.
-        #   4. self.embedding_gpu_lock   - guards self.llm_embedder.
-        #
-        # The two GPU locks are separate rather than one lock so that a request embedding its result does not block an
-        # unrelated request that is generating. Nothing currently holds both at once except cleanup(), which is why the
-        # order between them (3 before 4) is only stated here rather than being load bearing anywhere else.
-        self.sessions_lock = threading.Lock()
-        self.session_locks = {}
+        Runs as the last step of construction. It is asked for here rather than in create_session() because it is
+        prompted once per process, interactively, before any session exists.
 
-        self.generating_gpu_lock = threading.Lock()
-        self.embedding_gpu_lock = threading.Lock()
+        Returns:
 
-        # Flipped by cleanup() so that a request arriving during shutdown is refused rather than handed a model that is
-        # in the middle of being freed. Guarded by the two GPU locks.
-        self.models_released = False
-
-        self.model_type = self.argsDict['model_type']
-
-        # check to see if both models exist - if not, exit
-        if not os.path.exists(self.argsDict['generating_model']):
-            logger.error(f"{ColoredText.RED_TEXT}RolePlayStream: The model [{self.argsDict['generating_model']}] does not exist - exiting.{ColoredText.END_TEXT}")
-            sys.exit(0)
-        elif not os.path.exists(self.argsDict['embedding_model']):
-            logger.error(f"{ColoredText.RED_TEXT}RolePlayStream: The model [{self.argsDict['embedding_model']}] does not exist - exiting.{ColoredText.END_TEXT}")
-            sys.exit(0)
-
-        # Work out which card each model goes on. The embedding model is tiny, so it is always pinned to the single
-        # nominated GPU even when the generative model is being spread across all of them - splitting a 100 MB model
-        # would buy nothing and would put its tensors on a card the generator wants for its own layers.
-        gpu_index = self.argsDict.get('gpu', LlamaUtils.GPU_INDEX)
-        embedder_gpu_kwargs = LlamaUtils.build_gpu_kwargs(gpu_index, False, 'embedding', logger.info)
-        generator_gpu_kwargs = LlamaUtils.build_gpu_kwargs(gpu_index, self.argsDict.get('split_gpus', False), 'generative', logger.info)
-        # Flash attention and KV cache precision for the generative model only; the embedder is tiny and keeps the
-        # library defaults. See LlamaUtils.build_context_kwargs for why these exist and what they cost.
-        generator_context_kwargs = LlamaUtils.build_context_kwargs(self.argsDict.get('flash_attn', LlamaUtils.FLASH_ATTN), self.argsDict.get('kv_cache_type', LlamaUtils.KV_CACHE_TYPE), logger.info)
-
-        # Initialize the EMBEDDING model
-        self.llm_embedder = Llama(
-            model_path=self.argsDict['embedding_model'],
-            n_gpu_layers=self.argsDict['embedding_gpu_layers'],
-            embedding=True,  # ESSENTIAL for embedding models
-            verbose=self.argsDict['debug'],
-            n_ctx=self.argsDict['embedding_max_context_tokens'], # Embedding models don't need huge context for individual texts, but set a reasonable one
-            **embedder_gpu_kwargs
-        )
-
-        logger.info(f"{ColoredText.GREEN_TEXT}RolePlayStream: Embedding model [{self.argsDict['embedding_model']}] loaded with [{self.argsDict['embedding_gpu_layers']}] GPU layers and a context size of [{self.argsDict['embedding_max_context_tokens']}].{ColoredText.END_TEXT}")
-
-        # Initialize the GENERATIVE model
-        self.llm_generator = Llama(
-            model_path=self.argsDict['generating_model'],
-            n_gpu_layers=self.argsDict['generating_gpu_layers'],
-            embedding=False, # NOT needed for a generative model
-            n_ctx=self.argsDict['generating_max_context_tokens'], # This is the context window for the chat model
-            chat_format=self.argsDict['chat_format'],  # you should usually leave this None unless you have a real need
-            verbose=self.argsDict['debug'],
-            **generator_gpu_kwargs,
-            **generator_context_kwargs
-        )
-        logger.info(f"{ColoredText.GREEN_TEXT}RolePlay: Generative text model [{self.argsDict['generating_model']}] loaded with [{self.argsDict['generating_gpu_layers']}] GPU layers and a context size of [{self.argsDict['generating_max_context_tokens']}].{ColoredText.END_TEXT}")
-
-        # Take over prompt formatting from llama-cpp-python so that reasoning can be switched off.
-        # See the equivalent block in role_play.py for why this is necessary; in short, the library
-        # freezes its own formatter and 'create_chat_completion()' has no '**kwargs', so a template
-        # variable like 'enable_thinking' cannot otherwise be reached. Reasoning starts OFF, which
-        # matters more here than in the standalone script - a spoken session pays for every token
-        # of deliberation in latency before the user hears a word.
-        self.thinking_supported = False
-        try:
-            ChatTemplate.install_chat_handler(self.llm_generator, thinking=False)
-            self.thinking_supported = ChatTemplate.supports_thinking(self.llm_generator)
-            architecture = ChatTemplate.model_architecture(self.llm_generator)
-            logger.info(f"{ColoredText.GREEN_TEXT}RolePlay: Using the model's embedded chat template (architecture [{architecture}]); reasoning is {'available and currently suppressed' if self.thinking_supported else 'not applicable to this model'}.{ColoredText.END_TEXT}")
-        except ValueError as e:
-            logger.warning(f"{ColoredText.YELLOW_TEXT}RolePlay: {e} Falling back to llama-cpp-python's own prompt formatting.{ColoredText.END_TEXT}")
-
-        # Stop strings that end an assistant turn for THIS architecture; merged with the
-        # conversational stops at generation time rather than replacing them.
-        self.architecture_stops = ChatTemplate.stop_tokens(self.llm_generator)
-
+        """
         if self.argsDict['encrypted']:
-            self.passphrase = getpass.getpass("🔑 Enter conversation passphrase: ")
+            self.passphrase = getpass.getpass("\U0001F511 Enter conversation passphrase: ")
         else:
             self.passphrase = ""
-
 
     def create_session(self, session_id: str, user_id: str, player_name: str, system_prompt_id: str, spoken_response: bool, continuous_save: bool, load_previous: bool):
         """
@@ -239,152 +148,39 @@ class RolePlayStream:
             logger.info(f"{ColoredText.BLUE_TEXT} Added session_id [{session_id}]: user_id {user_id}, player_name {player_name}, system_prompt_id [{system_prompt_id}], spoken_response [{spoken_response}], continuous_save [{continuous_save}], load_previous [{load_previous}].{ColoredText.END_TEXT}")
             return self.sessions[session_id]
 
-    def get_session(self, session_id):
-        with self.sessions_lock:
-            return self.sessions.get(session_id)
-
-    def get_session_and_lock(self, session_id):
+    def create_session_from_request(self, session_id: str, request: Dict[str, Any]) -> str:
         """
-        Looks up a session AND the lock that guards it, as a single atomic step.
+        Pulls the role-play session's parameters off the request and creates the session.
 
-        This exists because fetching the two separately is a race: a caller that gets the session, and only then reaches
-        for self.session_locks[session_id], can have remove_session delete the lock in between and take a KeyError to
-        the face. Since the pair is returned under one acquisition of sessions_lock, the caller always ends up with a
-        lock object that genuinely belongs to the session it was handed - even if the session is torn down a moment
-        later, in which case the caller simply does its work against a dictionary nobody will read again.
+        Request fields consumed:
+        * user_id - something that identifies the user. This will be used as part of a directory name, which may store the user chat log
+        * system_prompt_id - identifies the system prompt
+        * player_name - The name of the user as far as the LLM is concerned. This can be different from user_id
+        * spoken_response - Boolean. True if this will be run through a TTS (text to speech), False otherwise. If you are just getting back text, ste to False.
+        * continuous_save - Boolean. True if you wish to save after every interaction, False otherwise. Saving means you can end the conversation and pick up at a later time / data, exctly where you left off.
+        * load_previous - Boolean. If, on the first iteration, we should load any previous conversation, if it exists.
 
         Args:
-            session_id: The session to look up.
+            session_id: The session to create.
+            request: The full client request dictionary.
 
         Returns:
-            tuple: (session_dict, session_lock), or (None, None) if there is no such session.
+            str: the system message for this session, taken from the session that was just built.
         """
-        with self.sessions_lock:
-            session = self.sessions.get(session_id)
-            if session is None:
-                return None, None
-            return session, self.session_locks[session_id]
+        user_id = request.get('user_id', 'UNKNOWN')
+        system_prompt_id = request.get('system_prompt_id', 'default')
+        player_name = request.get('player_name', '')
+        spoken_response = request.get('spoken_response', True) # we pay a higher penalty if this is false and we need a spoken response, rather than if we wished for a text response and got spoken response instead
+        continuous_save = request.get('continuous_save', False)
+        load_previous = request.get('load_previous', True)
 
-    def remove_session(self, session_id):
-        """
-        When used with AmadeoServer, set this to 'additional_shutdown' so it will run when the socket is closed. If not using AmadeoServer, run this at the end of the session.
+        retDict = self.create_session(session_id, user_id, player_name, system_prompt_id, spoken_response, continuous_save, load_previous)
 
-        Args:
-            session_id:
-
-        Returns:
-
-        """
-        logger.info(f"{ColoredText.BLUE_TEXT}session_id {session_id} ended - removing from dictionary.{ColoredText.END_TEXT}")
-
-        # Detach the session from the structure first, holding sessions_lock only for the pop itself. Once it is out of
-        # both dictionaries no new request can find it, so there is nothing to be gained by continuing to hold the
-        # structure lock - and a great deal to lose: the wait below can easily run to tens of seconds if the user
-        # disconnected mid-generation, and holding sessions_lock across that wait would stall every OTHER user's request
-        # dispatch behind this one disconnect.
-        with self.sessions_lock:
-            session = self.sessions.pop(session_id, None)
-            session_lock = self.session_locks.pop(session_id, None)
-
-        if session_lock is None:
-            return  # never existed, or a second shutdown for the same session - either way there is nothing to wait on
-
-        # A request that grabbed this session before the pop is still working on it. Wait for it to finish so that we do
-        # not return - and let the caller tear the connection down - while a generation is still writing to the session.
-        with session_lock:
-            pass
-
-    def handle_client_request(self, request: Dict[str, Any], data:bytes = None):
-        """
-        This method is designed specifically to handle a request from a server - this class can stay running alongside a server class, but the server class will call this method when it gets a request (the server class will handle stuff like sockets etc etc, but this will handle the SPECIFIC
-        tasks related to the LLM). This method (and other methods in other classes that implement this) expects a dictionary and data (bytes, which can represent all kinds of media files), although the data portion of that may not be used (depending on the case; in the case of LLMs, this is not used).
-        This should return a dictionary (that will be turned into JSON) and byte data (if applicable, but in our case its not).
-
-        To see the basics of what is expected for the server, see the main description for 'amadeo_server.AmadeoServer', although there are some additional ones specific to a Llama implementation with a vector database:
-        * command == 'create_llm_session' (used for the first request from the LLM ONLY - this returns the system message)
-            * user_id - something that identifies the user. This will be used as part of a directory name, which may store the user chat log
-            * system_prompt_id - identifies the system prompt
-            * player_name - The name of the user as far as the LLM is concerned. This can be different from user_id
-            * spoken_response - Boolean. True if this will be run through a TTS (text to speech), False otherwise. If you are just getting back text, ste to False.
-            * continuous_save - Boolean. True if you wish to save after every interaction, False otherwise. Saving means you can end the conversation and pick up at a later time / data, exctly where you left off.
-            * load_previous - Boolean. If, on the first iteration, we should load any previous conversation, if it exists.
-        * command == 'request' (used for all LLM requests after the first one)
-            * 'user_request' - The current request from the user. The LLM will generate a direct response to this.
-            * no other fields needed
-        * command (anything else) (anything else counts as 'request', with a warning in the log)
-            * 'user_request' - The current request from the user. The LLM will generate a direct response to this.
-            * no other fields needed
-
-        To see the base dictionary fields will be sent to the client. see the main description for 'amadeo_server.AmadeoServer'; here are ADDITIONAL fields that are sent:
-        * response - the response as generated by the LLM
-
-
-        Args:
-            request: A dictionary that will contain fields. It should ALWAYS contain 'user_request', which represents the user's request of the LLM. The first call to this should include the 'system_prompt', but if its not sent in subseuqent turns its OK - its set on the first turn.
-            data: bytes - This will always be ignored.
-
-        Returns:
-            Tuple[dict, None] - The dictionary (that will be converted to JSON and sent to the client), None (Since this has to fit the format of what we may send to a client, that is (JSON, media_data) - and since this returns no media, its always None)
-        """
-
-        session_id = request.get('sessionID') # comes from AmadeoServer - at this point, we know its a legit session_id
-        command = request.get('command', 'UNKNOWN')
-        user_request = request.get('user_request')
-
-        # just see if this session exists
-        if self.get_session(session_id):
-            sessionExists = True
-        else:
-            sessionExists = False
-
-        if command != 'create_llm_session' and not user_request:
-            # If there is no user request, fail immediately
-            logger.warning(f"{ColoredText.GREEN_TEXT}session_id {session_id} made a request, but there was no request contents.{ColoredText.END_TEXT}")
-            response = {
-                'success': False,
-                'type': 'error',
-                "response": '',
-                "message": "No user request made.",
-                "elapsed_time": 0.0,
-                'file_size': 0
-                }
-            return response, None
-
-        else:
-            if command == 'create_llm_session' and sessionExists:
-                logger.warning(f"{ColoredText.GREEN_TEXT}session_id {session_id} requested to be established, but it was already established - ignoring establishment request and processing LLM request.{ColoredText.END_TEXT}")
-
-                return self.get_response(request), None
-            elif command == 'create_llm_session' and not sessionExists:
-                user_id = request.get('user_id', 'UNKNOWN')
-                system_prompt_id = request.get('system_prompt_id', 'default')
-                player_name = request.get('player_name', '')
-                spoken_response = request.get('spoken_response', True) # we pay a higher penalty if this is false and we need a spoken response, rather than if we wished for a text response and got spoken response instead
-                continuous_save = request.get('continuous_save', False)
-                load_previous = request.get('load_previous', True)
-
-                retDict = self.create_session(session_id, user_id, player_name, system_prompt_id, spoken_response, continuous_save, load_previous)
-                # Spoken and text sessions get the same reply: confirmation that the session exists, carrying the system
-                # message. A spoken session once tried to generate a greeting here instead, but passed get_response() a
-                # bare string where it expects the request dictionary, so it raised AttributeError and the client never got
-                # an answer to its 'create_llm_session' request. The greeting was not worth fixing: the voice pipeline
-                # ignores this reply, so the greeting would never be heard, yet it would hold the GPU and leave a
-                # synthetic exchange at the top of the session's chat history.
-                response = {
-                    'success': True,
-                    'type': 'system_message',
-                    "response": '',
-                    "message": retDict['system_message'],
-                    "elapsed_time": 0.0,
-                    'file_size': 0
-                }
-                return response, None
-            else:
-                if command != 'request':
-                    logger.warning(f"{ColoredText.GREEN_TEXT}session_id {session_id} requested command {command} - setting to 'request'.{ColoredText.END_TEXT}")
-                    command = 'request'
-
-                return self.get_response(request), None
+        # Role-play reads the system message off the session that was just created, because create_session() rewrites it
+        # per player - substituting the player name, or stripping the identification line when there is none. The
+        # knowledge base has no such per-session rewriting and reads argsDict instead. The two are NOT interchangeable,
+        # and the difference is preserved deliberately rather than unified.
+        return retDict['system_message']
 
     def get_response(self, request: Dict[str, Any]):
         """
@@ -404,43 +200,16 @@ class RolePlayStream:
 
         """
 
-        #start the clock
-        start_time = time.time()
+        # Everything a request needs before its session lock is taken - the clock, the session and its lock, and the
+        # two guards that refuse a request outright (unknown session, server shutting down) - is identical for every
+        # family. See StreamBase.begin_request.
+        ctx = self.begin_request(request)
+        if ctx.error:
+            return ctx.error
 
-        session_id = request.get('sessionID') # comes from AmadeoServer - at this point, we know its a legit session_id
-        user_input = request.get('user_request')
-
-        logger.info(f"{ColoredText.BLUE_TEXT}Handling request from session_id '{session_id}'.{ColoredText.END_TEXT}")
-
-        # mySessionDict requires the use of its session lock - we are CONSTANTLY using things from this dictionary here,
-        # so just lock the whole thing. The dictionary and its lock are fetched together, in one acquisition of
-        # sessions_lock, because fetching them separately races with remove_session - see get_session_and_lock.
-        mySessionDict, session_lock = self.get_session_and_lock(session_id)
-
-        # If the session_id was not found, immediately exit
-        if not mySessionDict:
-            response = {
-                'success': False,
-                'type': 'error',
-                "response": '',
-                "message": f"session_id {session_id} not found - maybe it recently closed?",
-                "elapsed_time": time.time() - start_time,
-                'file_size': 0
-            }
-            return response
-
-        # Cheap early bail during shutdown, so a request arriving after cleanup() does not grind through history
-        # assembly and vector searches only to be refused at the generation step. This read is deliberately unlocked -
-        # it is an optimisation, not the guard; the load bearing check is inside generating_gpu_lock further down.
-        if self.models_released:
-            return {
-                'success': False,
-                'type': 'error',
-                "response": '',
-                "message": "The server is shutting down and the models have been released.",
-                "elapsed_time": time.time() - start_time,
-                'file_size': 0
-            }
+        # Unpacked into the names the rest of this method already uses, so nothing below needs to change.
+        mySessionDict, session_lock = ctx.session, ctx.session_lock
+        start_time, user_input = ctx.start_time, ctx.user_input
 
         # The lock is really for mySessionDict
         with (session_lock):
@@ -613,10 +382,7 @@ class RolePlayStream:
 
                     # If we wish to see the chat history, print it
                     if chat_history_review:
-                        dumped_items = ''
-                        for item in mySessionDict['chat_history']:
-                            dumped_items += f"{ColoredText.YELLOW_TEXT}role: {ColoredText.END_TEXT}{ColoredText.GREEN_TEXT}{item['role']} {ColoredText.END_TEXT}{ColoredText.YELLOW_TEXT}token count: {ColoredText.END_TEXT}{ColoredText.GREEN_TEXT}{item['token_count']} {ColoredText.END_TEXT}\n"
-                            dumped_items += f"{ColoredText.YELLOW_TEXT}content: {ColoredText.END_TEXT}{ColoredText.CYAN_TEXT}{item['content']}{ColoredText.END_TEXT}\n\n"
+                        dumped_items = self.format_history_dump(mySessionDict['chat_history'])
                         if mySessionDict['spoken_response']:
                             # Really we should never get to this as spoken responses cannot review the chat history, but just in case...
                             response = {
@@ -681,10 +447,7 @@ class RolePlayStream:
 
                 # If we wish to see the chat history, send it
                 if chat_history_review:
-                    dumped_items = ''
-                    for item in abridged_chat_history:
-                        dumped_items += f"{ColoredText.YELLOW_TEXT}role: {ColoredText.END_TEXT}{ColoredText.GREEN_TEXT}{item['role']} {ColoredText.END_TEXT}{ColoredText.YELLOW_TEXT}token count: {ColoredText.END_TEXT}{ColoredText.GREEN_TEXT}{item['token_count']} {ColoredText.END_TEXT}\n"
-                        dumped_items += f"{ColoredText.YELLOW_TEXT}content: {ColoredText.END_TEXT}{ColoredText.CYAN_TEXT}{item['content']}{ColoredText.END_TEXT}\n\n"
+                    dumped_items = self.format_history_dump(abridged_chat_history)
                     if mySessionDict['spoken_response']:
                         # Really we should never get to this as spoken responses cannot review the chat history, but just in case...
                         response = {
@@ -731,46 +494,12 @@ class RolePlayStream:
                     else:
                         local_stop = ["[INST]", "<|im_end|>", "<|start_header_id|>", "User:", "Assistant:"]
 
-                    # The hard-coded stops above cover ChatML and Llama-3 only. Gemma 4 ends a turn
-                    # with '<turn|>' and Muse Glimmer with '<|eot|>', neither of which appears above,
-                    # so without these the model would run on past the end of its own reply.
-                    local_stop = local_stop + [stop for stop in self.architecture_stops if stop not in local_stop]
-
-                    # Conversational stops would fire inside a reasoning model's deliberation and end the turn empty, so
-                    # for such models they are applied to the stripped answer instead. See ChatTemplate.split_stops.
-                    generation_stop, answer_stop = ChatTemplate.split_stops(self.llm_generator, local_stop)
-
-                    logger.info(f"{ColoredText.BLUE_TEXT}Sending to the LLM generator for session_id {mySessionDict['session_id']} ... used_tokens: {used_tokens} generating_max_context_tokens: {self.argsDict['generating_max_context_tokens']} used_max_response_tokens: {used_max_response_tokens}{ColoredText.END_TEXT}")
-
-                    with self.generating_gpu_lock:
-                        # Checked INSIDE the lock: cleanup() sets this while holding the same lock, so a request that
-                        # was queued behind a shutdown finds it set here rather than calling into a freed model.
-                        if self.models_released:
-                            raise RuntimeError("the models have been released - the server is shutting down")
-
-                        # Set INSIDE the lock. Reasoning mode is a property of the shared generator,
-                        # not of a session, so setting it outside would let one session's '!reason'
-                        # turn leak into whichever other session happened to generate next.
-                        ChatTemplate.set_thinking(self.llm_generator, reason_used)
-
-                        llama_response = self.llm_generator.create_chat_completion(
-                            messages=messages_for_llm,
-                            max_tokens=used_max_response_tokens,
-                            stream=False,
-                            repeat_penalty = self.argsDict['repeat_penalty'],
-                            stop=generation_stop
-                        )
-
-                    # Get the full response content directly
-                    full_response_content = llama_response["choices"][0]["message"]["content"]
-
-                    # Strip any reasoning before the response goes any further, so that deliberation
-                    # never reaches the caller, the vector database or the chat history - where it
-                    # would be replayed to the model as though it were part of the conversation.
-                    # 'thinking' is passed explicitly rather than read back from the model: the lock has been
-                    # released by now, so another session may already have changed the generator's setting.
-                    full_response_content = ChatTemplate.strip_reasoning(full_response_content, self.llm_generator, thinking=reason_used)
-                    full_response_content = ChatTemplate.truncate_at_stops(full_response_content, answer_stop)
+                    # Everything from merging this architecture's stops through stripping reasoning out of the result
+                    # is identical for every family; only 'messages_for_llm' and the conversational stops above are
+                    # family specific. See StreamBase.generate_once.
+                    full_response_content = self.generate_once(
+                        messages_for_llm, local_stop, used_max_response_tokens,
+                        reason_used, mySessionDict['session_id'], used_tokens)
 
                     # if there was a response AND we didnt look into the crystal ball (i.e. we want to save this interaction), continue
                     if full_response_content.strip() and not crystal_ball:
@@ -1037,37 +766,6 @@ class RolePlayStream:
         logger.info(f"{ColoredText.BLUE_TEXT}RolePlayStream.load_chat_history: Current Vector Database size: {len(sessionDict['db'].df)} documents.{ColoredText.END_TEXT}")
 
         return sessionDict['chat_history']
-
-    def cleanup(self):
-        """
-        Releases LLMs from memory. Call this right before shutdown.
-
-        Both GPU locks are taken so that this cannot free a model out from under a request that is mid-generation or
-        mid-embedding; the locks are acquired in the documented order (generating, then embedding - see __init__) and
-        held across the whole release. 'models_released' is set while they are still held, so any request that was
-        waiting on a lock finds the flag set the moment it gets in and bails out instead of calling into a freed model.
-
-        This does NOT tear down live sessions - AmadeoServer calls remove_session for each of those as its connections
-        close. Sessions still holding a VectorDB that references these models will fail if used after this point, which
-        is why this belongs at shutdown and nowhere else.
-
-        Returns:
-
-        """
-
-        with self.generating_gpu_lock:
-            with self.embedding_gpu_lock:
-                if self.models_released:
-                    return  # already cleaned up; a second call must not del a second time
-
-                self.models_released = True
-
-                del self.llm_embedder
-                del self.llm_generator
-
-                gc.collect()  # Force garbage collection
-
-        logger.info(f"{ColoredText.BLUE_TEXT}RolePlayStream.cleanup: Generative and embedding models released.{ColoredText.END_TEXT}")
 
     @staticmethod
     def get_help(presets: dict = None) -> str:
