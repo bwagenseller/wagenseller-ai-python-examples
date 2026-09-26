@@ -49,8 +49,9 @@ race (see the comment at the top of llama_utils.py). Every llama_cpp import here
 the function that needs it, by which point the caller necessarily holds a loaded model anyway.
 """
 
+import json
 import re
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 
 # --------------------------------------------------------------------------------------------------
@@ -65,6 +66,15 @@ SCHEME_GEMMA_CHANNEL = "gemma"  # <|channel> ... <channel|>
 SCHEME_HARMONY = "harmony"      # <|start|>assistant to=self<|message|> ... <|eom|>
 SCHEME_NONE = "none"            # model has no reasoning mode
 
+# Tool-call families: how a model spells a tool call in its OUTPUT. Separate from the reasoning
+# scheme because the two vary independently (Qwen 3.6 shares Qwen's '<think>' reasoning but has
+# its own call syntax). An architecture with no 'tools' entry has no tool support here - either
+# its template has no tool protocol, or no parser has been written for it yet (CS-21: the first
+# cut covers Muse-Glimmer, Qwen 3.6 and Gemma 4). See parse_tool_calls().
+TOOL_SCHEME_ATEM = "atem"          # <atem:function_calls><atem:invoke name=...><atem:parameter name=...>
+TOOL_SCHEME_QWEN_XML = "qwen_xml"  # <tool_call><function=NAME><parameter=P>...</parameter></function></tool_call>
+TOOL_SCHEME_GEMMA = "gemma"        # <|tool_call>call:NAME{key:<|"|>str<|"|>,n:14}<tool_call|>
+
 # Maps the GGUF's 'general.architecture' string to its reasoning scheme, the template kwargs
 # that enable and disable reasoning, and the stop strings that end an assistant turn.
 #
@@ -78,6 +88,7 @@ _SCHEMES: Dict[str, Dict[str, Any]] = {
         "think_on": {"enable_thinking": True},
         "think_off": {"enable_thinking": False},
         "stops": ["<|im_end|>", "<|endoftext|>"],
+        "tools": TOOL_SCHEME_QWEN_XML,
     },
     "qwen3moe": {
         "scheme": SCHEME_QWEN,
@@ -90,12 +101,14 @@ _SCHEMES: Dict[str, Dict[str, Any]] = {
         "think_on": {"enable_thinking": True},
         "think_off": {"enable_thinking": False},
         "stops": ["<turn|>", "<|turn>"],
+        "tools": TOOL_SCHEME_GEMMA,
     },
     "muse-glimmer": {
         "scheme": SCHEME_HARMONY,
         "think_on": {"reasoning_strength": "high"},
         "think_off": {"reasoning_strength": "low"},
         "stops": ["<|eot|>", "<|return|>"],
+        "tools": TOOL_SCHEME_ATEM,
     },
 }
 
@@ -409,6 +422,393 @@ def strip_reasoning(text: str, llm=None, scheme: Optional[str] = None,
         # closing tag means the budget ran out mid-thought: none of this is an answer.
         return ""
     return text.strip()
+
+
+# --------------------------------------------------------------------------------------------------
+# Tool calls
+# --------------------------------------------------------------------------------------------------
+#
+# llama-cpp-python 0.3.35 has no tool-call parsing, for the same reason it has no reasoning
+# support: that lives in the separate 'llama-server' binary. Passing 'tools=' to
+# create_chat_completion() (without 'tool_choice') only renders the definitions into the prompt
+# through the GGUF's template; the model's reply comes back as plain text in the model's own
+# syntax, and this section turns that text back into calls.
+#
+# The syntax for each scheme was taken from the models' own templates, which render a past
+# assistant tool call the way the model is trained to emit one. CS-21's
+# 'tests/tool_call_fixtures.py' holds real examples and 'tests/check_tool_parsers.py' runs them.
+
+
+class ToolParse(NamedTuple):
+    """
+    What a generation turned out to be.
+
+    Attributes:
+        kind (str): 'answer' - no tool call, 'text' is the reply;
+                    'calls' - one or more complete tool calls in 'calls';
+                    'malformed' - a call was started but cannot be parsed (typically cut off by
+                    the token budget). The caller must not execute anything and must not show
+                    the text as an answer.
+        calls (list[dict]): {'name': str, 'arguments': dict} per call, in the order emitted.
+        text (str): The user-facing text with reasoning and call syntax removed. For 'answer' it
+                    is the reply; for 'calls' it is any prose the model wrote beside the calls.
+    """
+    kind: str
+    calls: List[Dict[str, Any]]
+    text: str
+
+
+TOOL_PARSE_ANSWER = "answer"
+TOOL_PARSE_CALLS = "calls"
+TOOL_PARSE_MALFORMED = "malformed"
+
+
+def tool_scheme_for(llm=None, architecture: Optional[str] = None) -> Optional[str]:
+    """
+    The tool-call scheme for a model, or None if it has no tool support here.
+
+    Args:
+        llm: A loaded llama_cpp.Llama instance.
+        architecture (str, optional): A 'general.architecture' string, instead of a model.
+
+    Returns:
+        str | None: One of the TOOL_SCHEME_* constants, or None.
+    """
+    if architecture is None:
+        architecture = model_architecture(llm) if llm is not None else ""
+    return _SCHEMES.get(architecture, _DEFAULT_SCHEME).get("tools")
+
+
+def supports_tools(llm) -> bool:
+    """True if this model's tool calls can be parsed. A model without it runs with tools disabled."""
+    return tool_scheme_for(llm) is not None
+
+
+# --- ATEM (Muse-Glimmer) -------------------------------------------------------------------------
+
+_ATEM_INVOKE = re.compile(r'<atem:invoke\s+name="(?P<name>[^"]*)"\s*>(?P<body>.*?)</atem:invoke>', re.DOTALL)
+_ATEM_PARAM = re.compile(r'<atem:parameter\s+name="(?P<name>[^"]*)"\s*>(?P<value>.*?)</atem:parameter>', re.DOTALL)
+# A Harmony header naming a recipient other than the model itself or the user: a tool call.
+_HARMONY_TOOL_HEADER = re.compile(r"to=(?!self\b|user\b)[\w.\-]+(?:\.\*)?\s*<\|message\|>")
+# Muse-Glimmer's template lists tools as recipients in glob form - '# Valid recipients: "self", "get_datetime.*",
+# "user"' - and the model sometimes copies the '.*' into the call itself ('to=delegate.*', name="delegate.*"). It is
+# the template's own notation for that tool, so it is accepted. Before this, the call was refused as an unknown tool
+# and the model repeated it until the round cap (seen live, 2026-09-25, 64K + q8_0: every round of a turn).
+_ATEM_GLOB_SUFFIX = ".*"
+
+
+def _parse_atem(text: str):
+    """
+    Calls in Muse-Glimmer output. Parsed from the RAW text: a call is a Harmony message addressed
+    to the tool, and the reasoning stripper classifies every such message as deliberation.
+
+    The template states that "the output is not expected to be valid XML and is parsed with
+    regular expressions", and that string values are taken as-is, so values are not unescaped.
+    A call counts as started if a tool-addressed header or an '<atem:function_calls>' /
+    '<atem:invoke' opener appears; if more are started than complete, the output is malformed.
+
+    Returns:
+        tuple[list[dict], bool]: (calls, malformed)
+    """
+    calls = []
+    for invoke in _ATEM_INVOKE.finditer(text):
+        arguments = {p.group("name"): p.group("value") for p in _ATEM_PARAM.finditer(invoke.group("body"))}
+        name = invoke.group("name")
+        if name.endswith(_ATEM_GLOB_SUFFIX):
+            name = name[:-len(_ATEM_GLOB_SUFFIX)]
+        calls.append({"name": name, "arguments": arguments})
+    # A closing tag counts too: a model that garbles the opening (seen live from Gemma 4, which
+    # wrote a call with no opener at all) must not have its attempt shown as an answer.
+    started = max(text.count("<atem:invoke"), text.count("<atem:function_calls>"), text.count("</atem:invoke>"),
+                  len(_HARMONY_TOOL_HEADER.findall(text)))
+    return calls, started > len(calls)
+
+
+# --- Qwen 3.6 XML --------------------------------------------------------------------------------
+
+_QWEN_TOOL_CALL = re.compile(r"<tool_call>(?P<body>.*?)</tool_call>", re.DOTALL)
+_QWEN_FUNCTION = re.compile(r"^\s*<function=(?P<name>[^>\s]+)>(?P<body>.*?)</function>\s*$", re.DOTALL)
+_QWEN_PARAM = re.compile(r"<parameter=(?P<name>[^>\s]+)>(?P<value>.*?)</parameter>", re.DOTALL)
+
+
+def _qwen_value(raw: str) -> str:
+    """A Qwen parameter value: the template writes it between newlines, so remove exactly one each side."""
+    if raw.startswith("\n"):
+        raw = raw[1:]
+    if raw.endswith("\n"):
+        raw = raw[:-1]
+    return raw
+
+
+def _parse_qwen_xml(text: str):
+    """
+    Calls in Qwen 3.6 output, parsed from the REPLY part only - a call drafted inside '<think>' is
+    deliberation, not a call. Each '<tool_call>' holds one '<function=NAME>' block. Qwen models are
+    also trained on the older Hermes form, a JSON object inside '<tool_call>', so that is accepted
+    as a fallback rather than being reported as malformed.
+
+    Returns:
+        tuple[list[dict], bool]: (calls, malformed)
+    """
+    calls, malformed = [], False
+    for block in _QWEN_TOOL_CALL.finditer(text):
+        body = block.group("body")
+        function = _QWEN_FUNCTION.match(body)
+        if function is not None:
+            arguments = {p.group("name"): _qwen_value(p.group("value"))
+                         for p in _QWEN_PARAM.finditer(function.group("body"))}
+            calls.append({"name": function.group("name"), "arguments": arguments})
+            continue
+        try:
+            hermes = json.loads(body)
+            calls.append({"name": hermes["name"], "arguments": dict(hermes.get("arguments") or {})})
+        except (ValueError, KeyError, TypeError, AttributeError):
+            malformed = True
+    complete = len(_QWEN_TOOL_CALL.findall(text))
+    if text.count("<tool_call>") > complete or text.count("</tool_call>") > complete:
+        malformed = True
+    return calls, malformed
+
+
+# --- Gemma 4 -------------------------------------------------------------------------------------
+
+_GEMMA_TOOL_CALL = re.compile(r"<\|tool_call>call:(?P<name>[\w.\-]+)(?P<body>\{.*?\})<tool_call\|>", re.DOTALL)
+_GEMMA_STRING = '<|"|>'
+
+
+class _GemmaValueParser:
+    """
+    Parses Gemma 4's argument serialisation, which is JSON-like but NOT JSON:
+
+        {days:14,term:<|"|>Q1<|"|>,tags:[<|"|>a<|"|>,<|"|>b<|"|>],nested:{on:true}}
+
+    Keys are bare, strings are wrapped in the '<|"|>' token (so they may contain any character,
+    including quotes and commas, with no escaping), and numbers, booleans and null are bare. This
+    mirrors the template's own serialiser. Recursive descent over the text; raises ValueError on
+    anything it does not recognise, which the caller reports as malformed.
+    """
+
+    _BARE_END = ",}]:"
+
+    def __init__(self, text: str):
+        self.text = text
+        self.pos = 0
+
+    def parse(self):
+        value = self._value()
+        if self.pos != len(self.text):
+            raise ValueError(f"trailing text at {self.pos}")
+        return value
+
+    def _peek(self, token: str) -> bool:
+        return self.text.startswith(token, self.pos)
+
+    def _expect(self, token: str):
+        if not self._peek(token):
+            raise ValueError(f"expected {token!r} at {self.pos}")
+        self.pos += len(token)
+
+    def _value(self):
+        if self._peek(_GEMMA_STRING):
+            self.pos += len(_GEMMA_STRING)
+            end = self.text.find(_GEMMA_STRING, self.pos)
+            if end < 0:
+                raise ValueError("unterminated string")
+            value, self.pos = self.text[self.pos:end], end + len(_GEMMA_STRING)
+            return value
+        if self._peek("{"):
+            return self._object()
+        if self._peek("["):
+            return self._array()
+        return self._bare()
+
+    def _object(self) -> Dict[str, Any]:
+        self._expect("{")
+        result = {}
+        while not self._peek("}"):
+            key = self._bare_token()
+            self._expect(":")
+            result[key] = self._value()
+            if not self._peek("}"):
+                self._expect(",")
+        self._expect("}")
+        return result
+
+    def _array(self) -> List[Any]:
+        self._expect("[")
+        result = []
+        while not self._peek("]"):
+            result.append(self._value())
+            if not self._peek("]"):
+                self._expect(",")
+        self._expect("]")
+        return result
+
+    def _bare_token(self) -> str:
+        start = self.pos
+        while self.pos < len(self.text) and self.text[self.pos] not in self._BARE_END:
+            self.pos += 1
+        token = self.text[start:self.pos].strip()
+        if not token:
+            raise ValueError(f"empty token at {start}")
+        return token
+
+    def _bare(self):
+        token = self._bare_token()
+        if token in ("true", "false"):
+            return token == "true"
+        if token == "null":
+            return None
+        try:
+            return int(token)
+        except ValueError:
+            return float(token)          # raises ValueError for anything that is not a number
+
+
+def _parse_gemma(text: str):
+    """
+    Calls in Gemma 4 output, parsed from the REPLY part only (outside the thought channel). Each
+    call is one '<|tool_call>call:NAME{...}<tool_call|>' block; several may sit side by side.
+
+    Returns:
+        tuple[list[dict], bool]: (calls, malformed)
+    """
+    calls, malformed = [], False
+    for block in _GEMMA_TOOL_CALL.finditer(text):
+        try:
+            arguments = _GemmaValueParser(block.group("body")).parse()
+            if not isinstance(arguments, dict):
+                raise ValueError("arguments are not an object")
+            calls.append({"name": block.group("name"), "arguments": arguments})
+        except ValueError:
+            malformed = True
+    # An orphaned closer is malformed too. Captured live (CS-21): with reasoning on, Gemma 4 wrote
+    # 'calculator{expression:<|"|>...<|"|>}<tool_call|>' with no '<|tool_call>call:' opener.
+    complete = len(_GEMMA_TOOL_CALL.findall(text))
+    if text.count("<|tool_call>") > complete or text.count("<tool_call|>") > complete:
+        malformed = True
+    return calls, malformed
+
+
+# --- Shared --------------------------------------------------------------------------------------
+
+_TOOL_SYNTAX = {
+    TOOL_SCHEME_QWEN_XML: re.compile(r"<tool_call>.*?(?:</tool_call>|$)", re.DOTALL),
+    TOOL_SCHEME_GEMMA: re.compile(r"<\|tool_call>.*?(?:<tool_call\|>|$)", re.DOTALL),
+}
+
+
+def _coerce_arguments(arguments: Dict[str, Any], schema: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Converts argument values to the types the tool's JSON schema declares.
+
+    ATEM and Qwen deliver every value as a string ('14'); Gemma delivers bare numbers as numbers
+    but a model may still quote one. Coercing here means a tool always receives the same types
+    whichever model called it. A value that will not convert is left as it is, for the tool's own
+    validation to reject with a message the model can act on - parsing never fails on a type.
+
+    Args:
+        arguments (dict): The parsed arguments.
+        schema (dict, optional): The tool's 'parameters' JSON schema.
+
+    Returns:
+        dict: The arguments, coerced where the schema says how.
+    """
+    properties = (schema or {}).get("properties") or {}
+    coerced = {}
+    for key, value in arguments.items():
+        declared = (properties.get(key) or {}).get("type")
+        try:
+            if declared == "integer" and isinstance(value, str):
+                value = int(value.strip())
+            elif declared == "number" and isinstance(value, str):
+                value = float(value.strip())
+            elif declared == "boolean" and isinstance(value, str) and value.strip().lower() in ("true", "false"):
+                value = value.strip().lower() == "true"
+            elif declared in ("object", "array") and isinstance(value, str):
+                value = json.loads(value)
+            elif declared == "string" and not isinstance(value, str):
+                value = json.dumps(value)   # 14 -> '14', True -> 'true', {..} -> JSON
+        except ValueError:
+            pass
+        coerced[key] = value
+    return coerced
+
+
+def _resolve_name(name: str, schemas: Dict[str, Any]) -> str:
+    """
+    Maps a called name onto an offered tool. Muse-Glimmer's template shows namespaced calls
+    ('tool.function') as the general form, so if the full name is not offered but its last
+    dotted part is, the call is taken as meaning that. Anything else is returned unchanged, and
+    the caller refuses it as a tool that was never offered.
+    """
+    if name in schemas or "." not in name:
+        return name
+    tail = name.rsplit(".", 1)[1]
+    return tail if tail in schemas else name
+
+
+def parse_tool_calls(text: str, llm=None, tools: Optional[List[Dict[str, Any]]] = None,
+                     thinking: bool = False, architecture: Optional[str] = None) -> ToolParse:
+    """
+    Splits one raw generation into tool calls or an answer.
+
+    Must be given the RAW text (StreamBase.generate_raw), never the output of strip_reasoning():
+    for Muse-Glimmer that has already discarded the call.
+
+    Where the calls are looked for depends on the scheme. Muse-Glimmer's calls are separate
+    Harmony messages, so the whole text is searched. Qwen 3.6 and Gemma 4 put calls in the reply,
+    after any reasoning, so only the reply is searched - a call the model merely drafted while
+    thinking is not a call.
+
+    Unknown tool names are NOT rejected here. A well-formed call to a tool that was never offered
+    parses normally; refusing it is the caller's job, because only the caller knows what this
+    session is allowed to run.
+
+    Args:
+        text (str): The raw generated text.
+        llm: A loaded llama_cpp.Llama instance, used to pick the schemes.
+        tools (list[dict], optional): The tool definitions that were offered, in OpenAI function
+            form. Used to coerce argument types; without them values are left as parsed.
+        thinking (bool): Whether reasoning was enabled for this generation (see strip_reasoning).
+        architecture (str, optional): A 'general.architecture' string, instead of a model - for
+            testing without one loaded.
+
+    Returns:
+        ToolParse: kind 'answer', 'calls' or 'malformed'.
+    """
+    text = text or ""
+    if architecture is None:
+        architecture = model_architecture(llm) if llm is not None else ""
+    scheme_entry = _SCHEMES.get(architecture, _DEFAULT_SCHEME)
+    reasoning_scheme, tool_scheme = scheme_entry["scheme"], scheme_entry.get("tools")
+    thinking = bool(thinking) and bool(scheme_entry["think_on"])
+
+    if tool_scheme == TOOL_SCHEME_ATEM:
+        calls, malformed = _parse_atem(text)
+        # Harmony's answer is what is addressed to the user; call messages are not, so they are
+        # already excluded from it.
+        prose = strip_reasoning(text, scheme=reasoning_scheme, thinking=thinking)
+    elif tool_scheme in (TOOL_SCHEME_QWEN_XML, TOOL_SCHEME_GEMMA):
+        reply = strip_reasoning(text, scheme=reasoning_scheme, thinking=thinking)
+        parser = _parse_qwen_xml if tool_scheme == TOOL_SCHEME_QWEN_XML else _parse_gemma
+        calls, malformed = parser(reply)
+        prose = _TOOL_SYNTAX[tool_scheme].sub("", reply).strip()
+    else:
+        # No tool protocol for this model: whatever it wrote is an answer.
+        return ToolParse(TOOL_PARSE_ANSWER, [], strip_reasoning(text, scheme=reasoning_scheme, thinking=thinking))
+
+    if malformed:
+        return ToolParse(TOOL_PARSE_MALFORMED, [], "")
+    if not calls:
+        return ToolParse(TOOL_PARSE_ANSWER, [], prose)
+
+    schemas = {t["function"]["name"]: t["function"].get("parameters") for t in (tools or [])}
+    resolved = []
+    for call in calls:
+        name = _resolve_name(call["name"], schemas)
+        resolved.append({"name": name, "arguments": _coerce_arguments(call["arguments"], schemas.get(name))})
+    return ToolParse(TOOL_PARSE_CALLS, resolved, prose)
 
 
 # --------------------------------------------------------------------------------------------------

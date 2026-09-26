@@ -45,6 +45,10 @@ class LlamaUtils:
     # exactly (flash attention off, a 16-bit cache), so a config that does not mention them runs as it always has.
     # See build_context_kwargs for what they do and when to change them.
     FLASH_ATTN = False
+    # How long a streaming server keeps an idle client (seconds) before closing its connection and dropping its session.
+    # 0 = never: the connection lives as long as the client, and TCP keepalive closes it if the client vanishes (see
+    # AmadeoServer._enable_keepalive). 300 is AmadeoServer's own long-standing default.
+    CLIENT_IDLE_TIMEOUT_SECONDS = 300
     KV_CACHE_TYPE = "f16"
 
     # Extra generation room granted on a '!reason' turn, ON TOP of the normal response budget, because a model's
@@ -94,6 +98,35 @@ class LlamaUtils:
 
     # THREAD_COUNT = 8 #-1 means 'use all cores', 0 means default (Llama finds the number of threads to half of the number of CPU cores)
 
+
+    # A name a CLIENT chooses that the server turns into part of a path (a system prompt id, a user id): letters, digits,
+    # space, '_', '-', '.', starting with a letter or digit, and never '..'. Anything else - '../../etc/x', '/abs', 'a/b'
+    # - is refused rather than cleaned up, so a bad name fails loudly instead of quietly meaning something else.
+    SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.\-]{0,63}")
+
+    @staticmethod
+    def is_safe_name(name) -> bool:
+        """
+        True if 'name' may become one component of a path: see SAFE_NAME. Used for client-chosen system prompt ids and
+        user ids, which the streaming servers turn into file and directory names.
+        """
+        return isinstance(name, str) and bool(LlamaUtils.SAFE_NAME.fullmatch(name)) and ".." not in name
+
+    @staticmethod
+    def safe_prompt_path(prompt_dir: str, prompt_id) -> Optional[str]:
+        """
+        The file a client's system prompt id names - '<prompt_dir>/<prompt_id>.txt' - or None if the id is not a safe
+        name. A safe name is exactly one path component (no '/', no '..'), so the file is always directly inside
+        prompt_dir; a symlink the operator put IN that folder is still followed, as before. The file may not exist -
+        that is the caller's decision.
+
+        :param prompt_dir: The server's prompt folder.
+        :param prompt_id: The id the client sent.
+        :return: The path, or None.
+        """
+        if not prompt_dir or not LlamaUtils.is_safe_name(prompt_id):
+            return None
+        return os.path.join(prompt_dir, prompt_id + ".txt")
 
     ################################################################################################################### Loading System Prompt ####################################################################################################################
 
@@ -822,6 +855,8 @@ class LlamaUtils:
                     argDict['debug'] = config_dict.get('debug', False)
 
                     argDict['encrypted'] = config_dict.get('encrypted', False)
+                    # Passed to AmadeoServer by role_play_server.py; 0 = never close an idle client.
+                    argDict['client_idle_timeout_seconds'] = LlamaUtils.resolve_idle_timeout(config_dict.get('client_idle_timeout_seconds', LlamaUtils.CLIENT_IDLE_TIMEOUT_SECONDS))
 
                     # Optional so that a config written before GPU selection existed still loads. These fall back to
                     # the CLASS CONSTANTS, not to the command line: once this JSON loads it owns every setting, exactly
@@ -898,6 +933,112 @@ class LlamaUtils:
         return argDict
 
 
+    # The system half of a single-file SERVER config ('--json'): models, GPU, context and retrieval settings. Shared by
+    # the knowledge-base server and the tool server (CS-21), each of which adds its own fields on top. Field types are
+    # enforced by scrape_json_config. The optional ones are optional so that configs written before each setting existed
+    # still load: 'gpu'/'split_gpus' predate GPU selection, 'flash_attn'/'kv_cache_type' CS-17, the two reasoning
+    # allowances CS-18.
+    SERVER_SYSTEM_REQUIRED_FIELDS = {
+        'host': str,
+        'port': int,
+
+        'base_model_dir': str,
+        'base_embedding_dir': str,
+        'model': str,
+        'embedding_model': str,
+
+        'system_prompt_file': str,
+
+        'gpu_layers': int,
+        'embedding_gpu_layers': int,
+        'max_context_tokens': int,
+        'embedding_max_context_tokens': int,
+        'max_response_tokens': int,
+
+        'repeat_penalty': float,
+
+        'max_vector_database_pcnt': float,
+        'buffer_context_pcnt': float,
+
+        'top_k': int,
+        'min_vector_db_score': float
+    }
+    SERVER_SYSTEM_OPTIONAL_FIELDS = {
+        'model_type': str,
+        'chat_format': (str, type(None)),  # 'chat_format' is usually left null so llama.cpp can work it out itself
+        'debug': bool,
+        'gpu': int,
+        'split_gpus': bool,
+        'flash_attn': bool,
+        'kv_cache_type': str,
+        # The token settings are typed 'object' so the scraper never rejects them: a wrong type would raise TypeError,
+        # which the loader catches and answers by falling back to the defaults - the default MODEL included. Their
+        # own validators (resolve_response_token_presets / resolve_token_count) raise ValueError instead.
+        'reasoning_budget_tokens': object,
+        'suppressed_reasoning_tokens': object,
+        'client_idle_timeout_seconds': object,     # validated by resolve_idle_timeout, like the token settings
+    }
+
+    @staticmethod
+    def map_server_system_config(config_dict: dict) -> dict:
+        """
+        Turns the system half of a scraped single-file server config into the settings dictionary the stream classes
+        read: joins the model paths, renames the context/layer keys to their 'generating_' / 'embedding_' forms, and
+        fills optional fields with the class defaults.
+
+        Optional fields fall back to the CLASS CONSTANTS, not to the command line: once a JSON config loads it owns every
+        setting. resolve_token_count raises ValueError rather than KeyError/TypeError on purpose - see
+        SERVER_SYSTEM_OPTIONAL_FIELDS.
+
+        Args:
+            config_dict (dict): A config scraped with (at least) SERVER_SYSTEM_REQUIRED_FIELDS and
+                SERVER_SYSTEM_OPTIONAL_FIELDS.
+
+        Returns:
+            dict: The system settings. The caller adds its own server's fields and the loaded 'system_message'.
+
+        Raises:
+            KeyError: if a required field is missing.
+            ValueError: if a token setting is invalid.
+        """
+        return {
+            'host': config_dict['host'],
+            'port': config_dict['port'],
+
+            'generating_model': os.path.join(config_dict['base_model_dir'], config_dict['model']),
+            'embedding_model': os.path.join(config_dict['base_embedding_dir'], config_dict['embedding_model']),
+
+            'system_prompt_file': config_dict['system_prompt_file'],
+
+            'generating_gpu_layers': config_dict['gpu_layers'],
+            'embedding_gpu_layers': config_dict['embedding_gpu_layers'],
+            'generating_max_context_tokens': config_dict['max_context_tokens'],
+            'embedding_max_context_tokens': config_dict['embedding_max_context_tokens'],
+            'max_response_tokens': config_dict['max_response_tokens'],  # Maximum tokens the generative model is allowed to generate
+
+            'repeat_penalty': config_dict['repeat_penalty'],
+
+            'max_vector_database_pcnt': config_dict['max_vector_database_pcnt'],
+            'buffer_context_pcnt': config_dict['buffer_context_pcnt'],
+
+            'top_k': config_dict['top_k'],
+            'min_vector_db_score': config_dict['min_vector_db_score'],
+
+            'model_type': config_dict.get('model_type', LlamaUtils.MODEL_TYPE),
+            'chat_format': config_dict.get('chat_format', LlamaUtils.CHAT_FORMAT),
+            'debug': config_dict.get('debug', False),
+
+            'gpu': config_dict.get('gpu', LlamaUtils.GPU_INDEX),
+            'split_gpus': config_dict.get('split_gpus', False),
+            'flash_attn': config_dict.get('flash_attn', LlamaUtils.FLASH_ATTN),
+            'kv_cache_type': config_dict.get('kv_cache_type', LlamaUtils.KV_CACHE_TYPE),
+            # Deliberation allowances for reasoning models (CS-18).
+            'reasoning_budget_tokens': LlamaUtils.resolve_token_count(config_dict.get('reasoning_budget_tokens', LlamaUtils.REASONING_BUDGET_TOKENS), 'reasoning_budget_tokens'),
+            'suppressed_reasoning_tokens': LlamaUtils.resolve_token_count(config_dict.get('suppressed_reasoning_tokens', LlamaUtils.SUPPRESSED_REASONING_TOKENS), 'suppressed_reasoning_tokens'),
+            # Passed to AmadeoServer by the server scripts; 0 = never close an idle client.
+            'client_idle_timeout_seconds': LlamaUtils.resolve_idle_timeout(config_dict.get('client_idle_timeout_seconds', LlamaUtils.CLIENT_IDLE_TIMEOUT_SECONDS)),
+        }
+
     @staticmethod
     def get_args_dict_knowledge_base_server(default_host: str, default_port: int, log_func: Callable[[str], None] = print) -> dict:
         """
@@ -931,46 +1072,10 @@ class LlamaUtils:
                 try:
                     config_dict = LlamaUtils.load_knowledge_base_server_json_config(json_config_file)
 
-                    argDict['host'] = config_dict['host']
-                    argDict['port'] = config_dict['port']
-
-                    argDict['generating_model'] = os.path.join(config_dict['base_model_dir'], config_dict['model'])
-                    argDict['embedding_model'] = os.path.join(config_dict['base_embedding_dir'], config_dict['embedding_model'])
-
+                    # The system half is shared with every other single-file server config (the tool server's, CS-21);
+                    # see map_server_system_config. Only the knowledge base file is this server's own.
+                    argDict = LlamaUtils.map_server_system_config(config_dict)
                     argDict['knowledge_base_file'] = config_dict['knowledge_base_file']
-                    argDict['system_prompt_file'] = config_dict['system_prompt_file']
-
-                    argDict['generating_gpu_layers'] = config_dict['gpu_layers']
-                    argDict['embedding_gpu_layers'] = config_dict['embedding_gpu_layers']
-                    argDict['generating_max_context_tokens'] = config_dict['max_context_tokens']
-                    argDict['embedding_max_context_tokens'] = config_dict['embedding_max_context_tokens']
-                    argDict['max_response_tokens'] = config_dict['max_response_tokens']  # Maximum tokens the generative model is allowed to generate
-
-                    argDict['repeat_penalty'] = config_dict['repeat_penalty']
-
-                    argDict['max_vector_database_pcnt'] = config_dict['max_vector_database_pcnt']
-                    argDict['buffer_context_pcnt'] = config_dict['buffer_context_pcnt']
-
-                    argDict['top_k'] = config_dict['top_k']
-                    argDict['min_vector_db_score'] = config_dict['min_vector_db_score']
-
-                    argDict['model_type'] = config_dict.get('model_type', LlamaUtils.MODEL_TYPE)
-                    argDict['chat_format'] = config_dict.get('chat_format', LlamaUtils.CHAT_FORMAT)
-                    argDict['debug'] = config_dict.get('debug', False)
-
-                    # Optional so that a config written before GPU selection existed still loads. These fall back to
-                    # the CLASS CONSTANTS, not to the command line: once this JSON loads it owns every setting, exactly
-                    # as it did before GPU selection was added. See the same note in get_system_args_dict.
-                    argDict['gpu'] = config_dict.get('gpu', LlamaUtils.GPU_INDEX)
-                    argDict['split_gpus'] = config_dict.get('split_gpus', False)
-                    argDict['flash_attn'] = config_dict.get('flash_attn', LlamaUtils.FLASH_ATTN)
-                    argDict['kv_cache_type'] = config_dict.get('kv_cache_type', LlamaUtils.KV_CACHE_TYPE)
-                    # Deliberation allowances for reasoning models (CS-18). resolve_token_count raises ValueError rather
-                    # than KeyError/TypeError on purpose: the except below would otherwise swallow a bad value and fall
-                    # back to the command-line defaults - the default MODEL included. The knowledge base has no length
-                    # prefixes, so 'response_token_presets' does not apply here.
-                    argDict['reasoning_budget_tokens'] = LlamaUtils.resolve_token_count(config_dict.get('reasoning_budget_tokens', LlamaUtils.REASONING_BUDGET_TOKENS), 'reasoning_budget_tokens')
-                    argDict['suppressed_reasoning_tokens'] = LlamaUtils.resolve_token_count(config_dict.get('suppressed_reasoning_tokens', LlamaUtils.SUPPRESSED_REASONING_TOKENS), 'suppressed_reasoning_tokens')
 
                     log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_args_dict_knowledge_base_server: Config loaded from JSON file {json_config_file}; system prompt file is '{argDict['system_prompt_file']}'.{ColoredText.END_TEXT}")
                     use_default_arg_config = False
@@ -1359,7 +1464,8 @@ class LlamaUtils:
             # own validators (resolve_response_token_presets / resolve_token_count) raise ValueError instead.
             'response_token_presets': object,
             'reasoning_budget_tokens': object,
-            'suppressed_reasoning_tokens': object
+            'suppressed_reasoning_tokens': object,
+            'client_idle_timeout_seconds': object     # validated by resolve_idle_timeout
         }
 
         return LlamaUtils.scrape_json_config(filepath, required_fields, optional_fields)
@@ -1425,51 +1531,8 @@ class LlamaUtils:
             TypeError: If a field's value is not of the expected type.
         """
 
-        required_fields = {
-            'host': str,
-            'port': int,
-
-            'base_model_dir': str,
-            'base_embedding_dir': str,
-            'model': str,
-            'embedding_model': str,
-
-            'knowledge_base_file': str,
-            'system_prompt_file': str,
-
-            'gpu_layers': int,
-            'embedding_gpu_layers': int,
-            'max_context_tokens': int,
-            'embedding_max_context_tokens': int,
-            'max_response_tokens': int,
-
-            'repeat_penalty': float,
-
-            'max_vector_database_pcnt': float,
-            'buffer_context_pcnt': float,
-
-            'top_k': int,
-            'min_vector_db_score': float
-        }
-
-        # Optional fields with their types; if these are absent, the caller falls back to the class defaults.
-        # 'gpu' and 'split_gpus' are optional so that a server config written before GPU selection existed still loads;
-        # 'flash_attn' and 'kv_cache_type' likewise, for configs written before they existed (CS-17), and the two
-        # reasoning allowances for configs written before CS-18.
-        optional_fields = {
-            'model_type': str,
-            'chat_format': (str, type(None)),  # 'chat_format' is usually left null so llama.cpp can work it out itself
-            'debug': bool,
-            'gpu': int,
-            'split_gpus': bool,
-            'flash_attn': bool,
-            'kv_cache_type': str,
-            # The token settings are typed 'object' so the scraper never rejects them: a wrong type would raise TypeError,
-            # which the loader catches and answers by falling back to the defaults - the default MODEL included. Their
-            # own validators (resolve_response_token_presets / resolve_token_count) raise ValueError instead.
-            'reasoning_budget_tokens': object,
-            'suppressed_reasoning_tokens': object
-        }
+        required_fields = dict(LlamaUtils.SERVER_SYSTEM_REQUIRED_FIELDS, knowledge_base_file=str)
+        optional_fields = dict(LlamaUtils.SERVER_SYSTEM_OPTIONAL_FIELDS)
 
         return LlamaUtils.scrape_json_config(filepath, required_fields, optional_fields)
 
@@ -1695,6 +1758,20 @@ class LlamaUtils:
                 raise ValueError(f"Response token preset '{name}' must be a positive whole number, not {value!r}.")
             presets[name] = value
         return presets
+
+    @staticmethod
+    def resolve_idle_timeout(value) -> float:
+        """
+        Validates 'client_idle_timeout_seconds' from a server config.
+
+        :param value: The configured value.
+        :return: The value as seconds; 0 means never time out.
+        :raises ValueError: If it is not a number of zero or more - ValueError, not TypeError, for the reason given in
+                            resolve_response_token_presets (a TypeError would be taken as "fall back to the defaults").
+        """
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ValueError(f"'client_idle_timeout_seconds' must be a number of seconds, 0 (never) or more, not {value!r}.")
+        return float(value)
 
     @staticmethod
     def resolve_token_count(value, name: str) -> int:

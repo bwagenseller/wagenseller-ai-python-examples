@@ -1,5 +1,7 @@
 import os
 import sys
+import select
+import socket
 
 # Line editing for the '>>:' prompt. Importing readline is all it takes: input() then supports the arrow keys, Home/End,
 # Ctrl-A/Ctrl-E and word jumps for fixing a typo mid-line, and Up/Down to recall this session's earlier inputs. Without
@@ -30,18 +32,70 @@ class LlamaStreamClient:
     SPOKEN_RESPONSE = False
     USER_ID = 'Bob'
     MODE = 'role_play'
+    # The three server families this one client talks to. Anything else is refused at start-up: an unrecognised mode
+    # used to be sent as a knowledge-base session without a word, so a typo ("tool", "roleplay") opened the wrong kind
+    # of session.
+    VALID_MODES = ('role_play', 'knowledge_base', 'agent')
     CONTINUOUS_SAVE = False
     LOAD_PREVIOUS = True
 
     EXIT_PREFIX = '!exit'
     QUIT_PREFIX = '!quit'
 
+    # The agent server's approval question is answered on a line starting '??', so it can never be mistaken for the
+    # ordinary '>>' prompt. Only 'y' or 'yes' (any case) approves; anything else - including just Enter - is no.
+    APPROVAL_PROMPT = '?? '
+    APPROVAL_YES = ('y', 'yes')
+
+    # How long to wait for a reply. A tool turn can run for the server's 'max_turn_seconds' (default 180) plus however
+    # long the user takes over a '??' question, so agent mode waits longer than a plain chat reply ever needs.
+    RESPONSE_TIMEOUT = 120
+    TOOLS_RESPONSE_TIMEOUT = 600
+
     def __init__(self, argsDict: dict):
         self.argsDict = argsDict
         self.host = self.argsDict['host']
         self.port = self.argsDict['port']
 
-        self.socket_client = AmadeoClient(self.host, self.port, additional_server_response_functionality = self.handle_server_response, persistent_request_timeout = 120)
+        timeout = LlamaStreamClient.TOOLS_RESPONSE_TIMEOUT if self.argsDict.get('mode') == 'agent' else LlamaStreamClient.RESPONSE_TIMEOUT
+        self.socket_client = AmadeoClient(self.host, self.port, additional_server_response_functionality = self.handle_server_response, persistent_request_timeout = timeout,
+                                          interim_response_functionality = self.handle_interim_message)
+
+    def handle_interim_message(self, message: dict) -> dict:
+        """
+        Answers a question the server asks part-way through a request - the agent server's request to approve a call.
+
+        Shows the server's question (which names the tool and its exact arguments), then reads the answer on a '??'
+        line. The server treats only 'y' / 'yes' as approval, but the answer is normalised here as well so what the
+        user sees and what is sent always agree.
+
+        Args:
+            message: The interim message from the server.
+
+        Returns:
+            dict: the fields to send back to the server.
+        """
+        if message.get('type') != 'approval_request':
+            return {'command': 'approval_response', 'answer': 'no'}
+        timeout = float(message.get('timeout_seconds', 120))
+        print(f"\n{ColoredText.YELLOW_TEXT}{message.get('message', 'Allow this tool call?')}{ColoredText.END_TEXT}")
+        print(f"{ColoredText.BLUE_TEXT}(y/yes to allow; anything else, or no answer within {timeout:g} seconds, is no){ColoredText.END_TEXT}")
+        # This client owns the deadline, not the server: if it waited past the server's, a late answer would arrive
+        # as a stray request and every reply after it would be one behind. select() is only a readiness check, so the
+        # line is still read by input() with its usual editing keys.
+        print(LlamaStreamClient.APPROVAL_PROMPT, end='', flush=True)
+        answer = ''
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], timeout)
+            if ready:
+                answer = input().strip().lower()
+            else:
+                print()
+        except EOFError:
+            answer = ''
+        approved = answer in LlamaStreamClient.APPROVAL_YES
+        print(f"{ColoredText.BLUE_TEXT}{'Approved.' if approved else 'Not approved.'}{ColoredText.END_TEXT}")
+        return {'command': 'approval_response', 'answer': 'yes' if approved else 'no'}
 
     def handle_server_response(self, response, raw_data):
         """
@@ -65,6 +119,86 @@ class LlamaStreamClient:
                 # Handle different error/status types
                 if response.get('type') == 'error':
                     print(f"\n{ColoredText.RED_TEXT}Error from server: {response.get('message')} (lapsed time: {response.get('elapsed_time')} seconds).\n{ColoredText.END_TEXT}")
+
+    def open_llm_session(self):
+        """
+        Asks the server for an LLM session on the current connection, with this client's settings - once at start-up,
+        and again after a reconnect (see recover_connection).
+        """
+        if self.argsDict['mode'] == 'role_play':
+            self.socket_client.send_persistent_request(
+                command="create_llm_session",
+                message="Request to LLM",
+                binary_data=None,
+                user_id=self.argsDict['user_id'],
+                player_name=self.argsDict['player_name'],
+                system_prompt_id=self.argsDict['system_prompt_id'],
+                spoken_response=self.argsDict['spoken_response'],
+                continuous_save=self.argsDict['continuous_save'],
+                load_previous=self.argsDict['load_previous']
+            )
+        elif self.argsDict['mode'] == 'agent':
+            # the agent server (tool-calling family, CS-21): like role play it takes a player name (for '@@NAME@@' in its
+            # prompt) and a system_prompt_id, and saves and reloads
+            self.socket_client.send_persistent_request(
+                command="create_llm_session",
+                message="Request to LLM",
+                binary_data=None,
+                user_id=self.argsDict['user_id'],
+                player_name=self.argsDict['player_name'],
+                system_prompt_id=self.argsDict['system_prompt_id'],
+                spoken_response=self.argsDict['spoken_response'],
+                continuous_save=self.argsDict['continuous_save'],
+                load_previous=self.argsDict['load_previous']
+            )
+        else:
+            # knowledge_base
+            self.socket_client.send_persistent_request(
+                command="create_llm_session",
+                message="Request to LLM",
+                binary_data=None,
+                user_id=self.argsDict['user_id'],
+                spoken_response=self.argsDict['spoken_response']
+            )
+
+    def recover_connection(self, user_input: str) -> bool:
+        """
+        Called when a request came back with no response. Says what happened, reconnects with a new session, and - only
+        if the server had closed the connection, so the request never ran - sends the request again.
+
+        The server closes a connection that sat idle past its client_idle_timeout_seconds (300 by default; the agent
+        server's configs use 0 = never) and drops its session with it. Before this, the client said nothing and the
+        next reply simply never came. A request that instead TIMED OUT here is not resent: the server may still be
+        working on it, and running it twice could repeat a tool call.
+
+        Args:
+            user_input: The request that got no response.
+
+        Returns:
+            bool: True to carry on, False if the server cannot be reached (the client then exits).
+        """
+        error = getattr(self.socket_client, 'last_error', None)
+        timed_out = isinstance(error, (socket.timeout, TimeoutError))
+        if timed_out:
+            print(f"\n{ColoredText.RED_TEXT}The server did not answer within {self.socket_client.persistent_request_timeout:g} seconds. Reconnecting; the request was not resent.{ColoredText.END_TEXT}")
+        else:
+            print(f"\n{ColoredText.RED_TEXT}Lost the connection to the server (it may have closed an idle session, or restarted). Reconnecting...{ColoredText.END_TEXT}")
+
+        self.socket_client.close_connection()          # the old socket is dead; this also forgets the old session id
+        if not self.socket_client.establish_persistent_connection():
+            print(f"{ColoredText.RED_TEXT}Could not reconnect to the server. Exiting.{ColoredText.END_TEXT}")
+            return False
+        self.open_llm_session()
+        restored = self.argsDict.get('continuous_save') and self.argsDict.get('load_previous') and self.argsDict['mode'] != 'knowledge_base'
+        print(f"{ColoredText.BLUE_TEXT}Reconnected with a new session - "
+              f"{'the saved conversation was reloaded.' if restored else 'the earlier conversation is not carried over.'}{ColoredText.END_TEXT}")
+
+        if not timed_out:
+            response, _ = self.socket_client.send_persistent_request(command="request", message="Request to LLM",
+                                                                     binary_data=None, user_request=user_input)
+            if response is None:
+                print(f"{ColoredText.RED_TEXT}The request failed again after reconnecting ({self.socket_client.last_error}).{ColoredText.END_TEXT}")
+        return True
 
     def graceful_shutdown(self):
         """Handles a clean shutdown of the client connection."""
@@ -96,29 +230,7 @@ class LlamaStreamClient:
 
             logger.info(f"{ColoredText.BLUE_TEXT}Connected to server.{ColoredText.END_TEXT}")
 
-            # Send using the persistent request method
-            if self.argsDict['mode'] == 'role_play':
-                response, raw_data = self.socket_client.send_persistent_request(
-                    command="create_llm_session",
-                    message="Request to LLM",
-                    binary_data=None,
-                    user_id=self.argsDict['user_id'],
-                    player_name=self.argsDict['player_name'],
-                    system_prompt_id=self.argsDict['system_prompt_id'],
-                    spoken_response=self.argsDict['spoken_response'],
-                    continuous_save=self.argsDict['continuous_save'],
-                    load_previous=self.argsDict['load_previous']
-                )
-            else:
-                # knowledge_base
-                response, raw_data = self.socket_client.send_persistent_request(
-                    command="create_llm_session",
-                    message="Request to LLM",
-                    binary_data=None,
-                    user_id=self.argsDict['user_id'],
-                    spoken_response=self.argsDict['spoken_response']
-                )
-
+            self.open_llm_session()
 
             while True:
                 user_input = input("\n>>: ").strip()
@@ -134,6 +246,8 @@ class LlamaStreamClient:
                     binary_data=None,
                     user_request=user_input
                 )
+                if response is None and not self.recover_connection(user_input):
+                    break
 
 
 
@@ -155,7 +269,7 @@ class LlamaStreamClient:
         parser = argparse.ArgumentParser(description='Run a LLM, as you see fit.')
         parser.add_argument("-ho", "--host", default=LlamaStreamClient.HOST, help="The hostname/IP that the server will bind to.")
         parser.add_argument("-p", "--port", type=int, default=LlamaStreamClient.PORT, help="The port that the server will listen on for requests.")
-        parser.add_argument("-mo", "--mode", type=str, default=LlamaStreamClient.MODE, help="The mode of the chat: knowledge_base or role_play.")
+        parser.add_argument("-mo", "--mode", type=str, default=LlamaStreamClient.MODE, choices=LlamaStreamClient.VALID_MODES, help="The mode of the chat: knowledge_base, role_play or agent (the tool-using agent server).")
 
         parser.add_argument("-pn", "--player-name", type=str, default=SubjectiveConstants.BASE_PLAYER_NAME,help=f"Give your username - How should the LLM address you? Leave blank if you do not want it addressing you directly via name.{ColoredText.RED_TEXT}NOT VALID{ColoredText.END_TEXT} for Knowledge Base instances.")
         parser.add_argument("-spf", "--system-prompt-id", type=str, default=SubjectiveConstants.SYSTEM_PROMPT_ID,help=f"The name or phrase that identifies the system prompt on the server that you wish to use.{ColoredText.RED_TEXT}NOT VALID{ColoredText.END_TEXT} for Knowledge Base instances.")
@@ -224,6 +338,11 @@ class LlamaStreamClient:
                 print(f"{ColoredText.BLUE_TEXT}Thank you!{ColoredText.END_TEXT}")
             else:
                 print(f"{ColoredText.RED_TEXT}LlamaUtils.get_args_dict: Invalid arguments.{ColoredText.END_TEXT}")
+
+        if argDict and argDict.get('mode') not in LlamaStreamClient.VALID_MODES:
+            print(f"{ColoredText.RED_TEXT}Unknown mode {argDict.get('mode')!r} - it must be one of: "
+                  f"{', '.join(LlamaStreamClient.VALID_MODES)}.{ColoredText.END_TEXT}")
+            argDict = {}
 
         return argDict
 
@@ -329,5 +448,7 @@ class LlamaStreamClient:
 
 if __name__ == "__main__":
     argsDict = LlamaStreamClient.get_args_dict()
+    if not argsDict:
+        sys.exit(2)                 # the reason (bad arguments, unknown mode) has already been printed
     client = LlamaStreamClient(argsDict)
     client.run_client()

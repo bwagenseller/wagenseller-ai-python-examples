@@ -79,7 +79,12 @@ logger = logging.getLogger(__name__)
 
 class AmadeoServer:
 
-    CLIENT_TIMEOUT = 300 # timeout for client, in seconds. 300 = 5 minutes
+    CLIENT_TIMEOUT = 300 # timeout for client, in seconds. 300 = 5 minutes. 0 (or None) = never - see _enable_keepalive
+    # TCP keepalive, used only when client_timeout is 0: after KEEPALIVE_IDLE seconds of silence the kernel probes the
+    # client every KEEPALIVE_INTERVAL seconds and gives up after KEEPALIVE_COUNT unanswered probes (~2 minutes).
+    KEEPALIVE_IDLE = 60
+    KEEPALIVE_INTERVAL = 10
+    KEEPALIVE_COUNT = 6
 
     additional_shutdown: Optional[Callable[[str], None]]
 
@@ -91,6 +96,9 @@ class AmadeoServer:
             host: IP address to bind to (default: localhost)
             port: Port number to listen on (default: 8888)
             synchronous: if the call is synchronous. Basically, this is true when a client request comes in, a single, continuous, synchronous chain of function calls will happen, and then the result is returned to the client.
+            client_timeout: seconds a connected client may stay idle before its connection and session are closed. 0 (or
+                            None) = never: the connection stays open while the client lives, and TCP keepalive closes it
+                            if the client vanishes (see _enable_keepalive). Default CLIENT_TIMEOUT (300).
                          This would be false if, say, the server got the request, then had to run it through a different service (for example, the client sends audio, and the server sends it to ASR, gets the response from that and
                          sends it to a LLM). If the result is not immediately available after running additional_client_functionality this will be False. This is important as otherwise, AmadeoServer will try to send a
                          response to the client, which it cannot do if the result is not immediately available from additional_client_functionality.
@@ -262,6 +270,21 @@ class AmadeoServer:
         logger.debug(f"Received {len(binary_data)} bytes of binary data")
         return binary_data
 
+    @classmethod
+    def _enable_keepalive(cls, client_socket: socket.socket):
+        """
+        Turns on TCP keepalive for one client connection, so a vanished client is detected without an idle timeout.
+
+        Keepalive probes are answered by the client machine's kernel, not by the client program, so a live client that
+        is merely idle keeps its connection indefinitely; only a dead or unreachable one is closed. The per-connection
+        timings are Linux socket options; where the platform lacks them, the system-wide defaults apply (hours).
+        """
+        client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for name, value in (("TCP_KEEPIDLE", cls.KEEPALIVE_IDLE), ("TCP_KEEPINTVL", cls.KEEPALIVE_INTERVAL),
+                            ("TCP_KEEPCNT", cls.KEEPALIVE_COUNT)):
+            if hasattr(socket, name):
+                client_socket.setsockopt(socket.IPPROTO_TCP, getattr(socket, name), value)
+
     def cleanup_session(self, session_id):
         """
         Remove a session from active sessions
@@ -297,8 +320,14 @@ class AmadeoServer:
         try:
             logger.info(f"New client connected from {address[0]}:{address[1]}")
 
-            # Set socket timeout to prevent hanging on broken connections
-            client_socket.settimeout(self.client_timeout)
+            # Set socket timeout to prevent hanging on broken connections. With client_timeout 0 an idle client is kept
+            # for as long as it stays connected, and TCP keepalive does the job the timeout did: noticing a client that
+            # vanished without closing (network drop, a laptop going to sleep), so its session is still cleaned up.
+            if self.client_timeout:
+                client_socket.settimeout(self.client_timeout)
+            else:
+                client_socket.settimeout(None)
+                self._enable_keepalive(client_socket)
 
             # Main loop for handling connection
             while not self.shutdown_requested:
@@ -377,14 +406,31 @@ class AmadeoServer:
                                     }
                                     self.send_response(client_socket, error_response, None)
                                     continue
-                                elif client_session_id != '' and client_session_id not in self.active_sessions:
+                                elif not client_session_id:
+                                    # Initial connection - and session_id is guaranteed to be blank here. Generate new session ID.
+                                    # None (JSON null) counts as "no session requested", like ''. It used to be GRANTED as a
+                                    # session literally named None, which a client then treated as having no session at all.
+                                    session_id = self.generate_session_id()
+                                    logger.info(f"New persistent connection from {address[0]}:{address[1]} given sessionID {session_id}.")
+                                elif not isinstance(client_session_id, str):
+                                    # A requested sessionID must be a string; anything else is a malformed request
+                                    logger.warning(f"New persistent connection from {address[0]}:{address[1]} requested a non-string sessionID ({type(client_session_id).__name__}) - refused.")
+                                    error_response = {
+                                        'success': False,
+                                        'type': 'connection',
+                                        'message': "Invalid sessionID - it must be a string, or empty for a new session.",
+                                        'sessionID': '',
+                                        'requestID': request_id,
+                                        'client_address': address[0],
+                                        'client_port': address[1],
+                                        'file_size': 0
+                                    }
+                                    self.send_response(client_socket, error_response, None)
+                                    continue
+                                elif client_session_id not in self.active_sessions:
                                     # if the client_session_id is not empty and its not in self.active_sessions, we can use it
                                     session_id = client_session_id
                                     logger.info(f"New persistent connection from {address[0]}:{address[1]} requested sessionID {client_session_id} - granted.")
-                                elif client_session_id == '':
-                                    # Initial connection - and session_id is guaranteed to be blank here. Generate new session ID
-                                    session_id = self.generate_session_id()
-                                    logger.info(f"New persistent connection from {address[0]}:{address[1]} given sessionID {session_id}.")
                                 else:
                                     # client_session_id != '' but it was already in the list of sessionIDs - a big no-no
                                     logger.warning(f"New persistent session requested {session_id} for {address[0]}:{address[1]}, but that sessionID already in use.")
@@ -572,8 +618,12 @@ class AmadeoServer:
                         self.send_response(client_socket, return_json, None)
 
                 except socket.timeout:
-                    # Client has been inactive for too long
-                    logger.info(f"Client {address[0]}:{address[1]} timed out (Session: {session_id})")
+                    # Client has been inactive for too long - or, with no idle timeout, stopped answering keepalive
+                    # probes (the kernel reports that as a timed-out connection too)
+                    if self.client_timeout:
+                        logger.info(f"Client {address[0]}:{address[1]} timed out after {self.client_timeout} idle seconds (Session: {session_id})")
+                    else:
+                        logger.info(f"Client {address[0]}:{address[1]} stopped answering keepalive probes - connection presumed dead (Session: {session_id})")
                     break
 
                 except Exception as e:

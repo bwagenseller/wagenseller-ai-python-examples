@@ -1,0 +1,74 @@
+{
+    "host": "127.0.0.1",
+    "port": 65440,
+    "base_model_dir": "/home/kevin/ai/models/llama.cpp",
+    "base_embedding_dir": "/home/kevin/ai/models/llama.cpp/embedding_models",
+    "model": "Qwen3.6-35B-A3B-Aggressive-Q6.gguf",
+    "model_type": "qwen35moe",
+    "chat_format": null,
+    "embedding_model": "nomic-embed-text-v1.5.Q5_K_M.gguf",
+    "default_system_prompt_file": "/home/kevin/ai/agent_prompts/default_agent.txt",
+    "system_prompt_dir": "/home/kevin/ai/agent_prompts",
+    "default_timezone": "America/New_York",
+    "knowledge_base_file": "",
+    "base_convo_dir": "/home/kevin/ai/tool_conversations",
+    "encrypted": false,
+    "tools_allowed": [
+        "get_datetime",
+        "calculator",
+        "get_weather",
+        "fetch_url",
+        "web_search",
+        "get_grades"
+    ],
+    "script_tools": [
+        {
+            "script": "/home/kevin/Python/scripts/ai/ai-tools/get_weather/get_weather.py",
+            "python": "/home/kevin/miniforge3/envs/agent-tools/bin/python",
+            "config": "/home/kevin/ai/ai-tools/get_weather.json"
+        },
+        {
+            "script": "/home/kevin/Python/scripts/ai/ai-tools/fetch_url/fetch_url.py",
+            "python": "/home/kevin/miniforge3/envs/agent-tools/bin/python",
+            "config": "/home/kevin/ai/ai-tools/fetch_url.json"
+        },
+        {
+            "script": "/home/kevin/Python/scripts/ai/ai-tools/web_search/web_search.py",
+            "python": "/home/kevin/miniforge3/envs/agent-tools/bin/python",
+            "config": "/home/kevin/ai/ai-tools/web_search.json"
+        },
+        {
+            "script": "/home/kevin/Python/scripts/ai/ai-tools/get_grades/get_grades.py",
+            "python": "/home/kevin/miniforge3/envs/bash/bin/python",
+            "config": "/home/kevin/ai/ai-tools/get_grades.json"
+        }
+    ],
+    "tool_mode": "auto",
+    "max_tool_rounds": 10,
+    "max_turn_seconds": 180,
+    "max_tool_result_tokens": 3000,
+    "tool_result_share": 0.5,
+    "worker_notes": "auto",
+    "worker_notes_trigger": 0.35,
+    "worker_notes_tokens": 400,
+    "client_idle_timeout_seconds": 0,
+    "auto_approve": false,
+    "tool_audit_log": "",
+    "gpu": 0,
+    "split_gpus": false,
+    "flash_attn": false,
+    "kv_cache_type": "f16",
+    "reasoning_budget_tokens": 2048,
+    "suppressed_reasoning_tokens": 0,
+    "gpu_layers": -1,
+    "embedding_gpu_layers": -1,
+    "max_context_tokens": 8192,
+    "embedding_max_context_tokens": 512,
+    "max_response_tokens": 512,
+    "repeat_penalty": 1.1,
+    "max_vector_database_pcnt": 0.2,
+    "buffer_context_pcnt": 0.05,
+    "top_k": 4,
+    "min_vector_db_score": 0.46,
+    "debug": false
+}

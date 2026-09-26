@@ -1,11 +1,12 @@
 import gc
+import json
 import logging
 import os
 import sys
 import threading
 import time
 
-from typing import Dict, Any, List, NamedTuple, Optional
+from typing import Dict, Any, List, NamedTuple, Optional, Tuple
 
 # IMPORTANT: llama_utils MUST be imported before llama_cpp. Importing llama_cpp loads the llama.cpp shared library,
 # which registers its GGML CUDA backend and pins the device ordering for the life of the process; llama_utils sets
@@ -79,6 +80,22 @@ cleanup(), which is why the order between them (3 before 4) is only load bearing
 """
 
 logger = logging.getLogger(__name__)
+
+
+class AssembledContext(NamedTuple):
+    """
+    The prompt StreamBase.assemble_context() built for one turn.
+
+    Attributes:
+        messages (list[dict]): system message, retrieved context, chat history and the new user message, ready for
+            generate_once() / generate_raw().
+        used_tokens (int): the caller's 'used_tokens' plus everything this added.
+        history_used (list[dict]): the chat-history entries (with 'token_count') that went in - the whole history,
+            or the abridged tail that fitted. This is what a '!history' command shows the user.
+    """
+    messages: List[Dict[str, Any]]
+    used_tokens: int
+    history_used: List[Dict[str, Any]]
 
 
 class RequestContext(NamedTuple):
@@ -364,6 +381,44 @@ class StreamBase:
         # them ('RolePlayStream.cleanup: ...', 'KnowledgeBaseStream.cleanup: ...').
         logger.info(f"{ColoredText.BLUE_TEXT}{type(self).__name__}.cleanup: Generative and embedding models released.{ColoredText.END_TEXT}")
 
+    def save(self, sessionDict: Dict[str, Any]):
+        """
+        Writes a session's chat history and vector database to its conversation directory.
+
+        This MUST be called from within a lock on self.session_locks[session_id]!
+
+        Persistence is opt-in: a family calls this only when the user asked for it - role-play's '!save' command or
+        its 'continuous_save' session option. Nothing here decides to save on its own. Encryption, when a passphrase
+        is set, is handled by the session's VectorDB. Moved here from RolePlayStream (CS-21) so the tool family can
+        save too; a family that persists more than this overrides it and calls up.
+
+        Args:
+            sessionDict: the session to save; its 'db' and 'chat_history' are used.
+        """
+        sessionDict['db'].save_session(sessionDict['chat_history'])
+
+    def load_chat_history(self, sessionDict: Dict[str, Any], load_previous: bool) -> list:
+        """
+        (Re)loads a session's chat history and vector database from its conversation directory.
+
+        This MUST be called from within a lock on self.session_locks[session_id]!
+
+        The history is always reset first. It is then reloaded only if 'load_previous' is set and the conversation
+        directory exists - otherwise the session starts empty. A family that seeds or restores more than this (role-play
+        adds its initial documents) overrides it and calls up first.
+
+        Args:
+            sessionDict: the session to load into; its 'db', 'convo_dir' and 'chat_history' are used.
+            load_previous: whether to restore a previously saved conversation.
+
+        Returns:
+            list: the session's chat history, which is also stored in sessionDict['chat_history'].
+        """
+        sessionDict['chat_history'] = []
+        if os.path.exists(sessionDict['convo_dir']) and load_previous:
+            sessionDict['chat_history'] = sessionDict['db'].load_session()  # db.df will be updated internally by load_session
+        return sessionDict['chat_history']
+
     # ------------------------------------------------------------------------------------------------- Request dispatch
 
     def handle_client_request(self, request: Dict[str, Any], data: bytes = None):
@@ -506,6 +561,101 @@ class StreamBase:
 
         return RequestContext(mySessionDict, session_lock, start_time, user_input, None)
 
+    def assemble_context(self, session: Dict[str, Any], system_message: str, user_input: str, used_tokens: int,
+                         max_useable_tokens: float, think_used: bool, retrieve,
+                         use_full_history_when_it_fits: bool) -> AssembledContext:
+        """
+        Builds the message list for one turn: system message, then retrieved context, then chat history, then the user.
+
+        Lifted out of RolePlayStream.get_response (CS-21) so the tool family budgets its context the same way. The
+        knowledge base's version was the same code minus the "full history fits" shortcut, so it calls this too.
+
+        Budgeting, in order:
+          1. If 'use_full_history_when_it_fits' and the session has never overflowed, send the ENTIRE chat history when
+             it fits, with no vector search at all. The first time it does not fit, 'session["full_history_fits"]' is
+             set False for good, and every later turn takes step 2 - the history only grows.
+          2. Otherwise search the vector database with 'retrieve', within a token budget (wider on a think turn), then
+             fill what is left with the most recent chat history that fits.
+
+        The caller keeps the order of operations: it has already counted the system prompt, the response allowance and
+        the user message into 'used_tokens', and it decides what to do with the result - a '!history' command returns
+        'history_used' to the user instead of generating. 'retrieve' is the family's own search, because role-play
+        passes options the knowledge base does not have.
+
+        Args:
+            session: the session dictionary; its 'chat_history', 'full_history_fits' and 'session_id' are used.
+            system_message: the system prompt text. Always supplied - see AGENTS.md on Muse-Glimmer's default persona.
+            user_input: this turn's request, hidden-instruction delimiters still in place.
+            used_tokens: tokens already committed (system prompt, response allowance, user message).
+            max_useable_tokens: the context window less its safety buffer.
+            think_used: a '!remember'-style turn, which searches the vector database much more widely.
+            retrieve: callable (min_score, max_tokens, top_k) -> (items, tokens) - the family's vector search.
+            use_full_history_when_it_fits: whether step 1 applies to this family.
+
+        Returns:
+            AssembledContext: the messages, the new used_tokens, and the history entries that were included.
+        """
+        messages_for_llm = [{"role": "system", "content": system_message}]
+        history_used = None
+
+        if use_full_history_when_it_fits and session['full_history_fits']:
+            total_history_tokens = sum(d['token_count'] for d in session['chat_history'])
+            # if the total tokens for the history is less than the max context, just use the entire history
+            if used_tokens + total_history_tokens <= max_useable_tokens:
+                messages_for_llm.extend(StreamBase._for_model(d) for d in session['chat_history'])
+                used_tokens += total_history_tokens
+                history_used = session['chat_history']
+            else:
+                session['full_history_fits'] = False
+
+        # if the full history does not fit (or this family never sends it whole), use the vector database
+        if history_used is None:
+            # we need to set some things depending on if the user wants the LLM to 'really think'
+            if think_used:
+                logger.info(f"{ColoredText.CYAN_TEXT}Going far back in memory for session_id {session['session_id']}...{ColoredText.END_TEXT}")
+                max_vector_db_tokens = .85 * (max_useable_tokens - used_tokens) # this used to be 'max_vector_database_pcnt * max_useable_tokens', but long system prompts messed with this, so we capture this now, taking into account used_tokens
+                temp_top_k = 25 # set this very high to accommodate more returns
+                temp_min_vector_db_score = .05
+            else:
+                # normal run
+                max_vector_db_tokens = self.argsDict['max_vector_database_pcnt'] * (max_useable_tokens - used_tokens) # this used to be 'max_vector_database_pcnt * max_useable_tokens', but long system prompts messed with this, so we capture this now, taking into account used_tokens
+                temp_top_k = self.argsDict['top_k']
+                temp_min_vector_db_score = self.argsDict['min_vector_db_score']
+
+            # determine if there were relevant items from the vector DB
+            db_items, db_tokens = retrieve(temp_min_vector_db_score, max_vector_db_tokens, temp_top_k)
+            if db_items:
+                messages_for_llm.extend(db_items)
+                used_tokens += db_tokens
+
+            # Finally, add on the chat history - used_tokens is now the sum of the new user request, the system message, the preemptive assistant response, and the vector db entries
+            history_used, abridged_chat_history_tokens = LlamaUtils.fit_to_token_limit(session['chat_history'], max_useable_tokens - used_tokens)
+            # The tool family stores a call as an assistant message carrying 'tool_calls' followed by 'tool' results. Cutting
+            # the history to fit can leave the tail of such an exchange at the front with its head gone; a tool result with
+            # no call before it is malformed to every chat template, so drop those. Role-play and the knowledge base never
+            # store either kind of message, so for them this removes nothing.
+            while history_used and (history_used[0]['role'] == 'tool' or history_used[0].get('tool_calls')):
+                abridged_chat_history_tokens -= history_used[0]['token_count']
+                history_used = history_used[1:]
+            used_tokens += abridged_chat_history_tokens
+
+            # remove 'token_count'
+            messages_for_llm.extend(StreamBase._for_model(d) for d in history_used)
+
+        # Finally, append the most recent content; remember to remove any instruction delimiters if they exist (but leave the instructions intact)
+        messages_for_llm.append({"role": "user", "content": LlamaUtils.remove_instruction_delimiters(user_input, self.HIDDEN_INSTRUCTION_DELIMITER)})
+
+        return AssembledContext(messages_for_llm, used_tokens, history_used)
+
+    @staticmethod
+    def _for_model(entry: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        A chat-history entry as the model is sent it: everything but our 'token_count' bookkeeping. For role-play and the
+        knowledge base that is just 'role' and 'content'; the tool family's entries also carry 'tool_calls',
+        'tool_call_id' and 'name', which the chat template needs to render a past tool call natively.
+        """
+        return {key: value for key, value in entry.items() if key != 'token_count'}
+
     def format_history_dump(self, items: List[Dict[str, Any]]) -> str:
         """
         Renders chat history for the '!history' command, which shows the user what WOULD have been sent to the model.
@@ -522,7 +672,11 @@ class StreamBase:
         dumped_items = ''
         for item in items:
             dumped_items += f"{ColoredText.YELLOW_TEXT}role: {ColoredText.END_TEXT}{ColoredText.GREEN_TEXT}{item['role']} {ColoredText.END_TEXT}{ColoredText.YELLOW_TEXT}token count: {ColoredText.END_TEXT}{ColoredText.GREEN_TEXT}{item['token_count']} {ColoredText.END_TEXT}\n"
-            dumped_items += f"{ColoredText.YELLOW_TEXT}content: {ColoredText.END_TEXT}{ColoredText.CYAN_TEXT}{item['content']}{ColoredText.END_TEXT}\n\n"
+            dumped_items += f"{ColoredText.YELLOW_TEXT}content: {ColoredText.END_TEXT}{ColoredText.CYAN_TEXT}{item['content']}{ColoredText.END_TEXT}\n"
+            # The tool family's past calls: show what was called. Role-play and knowledge-base entries have no 'tool_calls'.
+            for call in item.get('tool_calls') or []:
+                dumped_items += f"{ColoredText.YELLOW_TEXT}tool call: {ColoredText.END_TEXT}{ColoredText.CYAN_TEXT}{call['function']['name']}({json.dumps(call['function']['arguments'], ensure_ascii=False)}){ColoredText.END_TEXT}\n"
+            dumped_items += "\n"
         return dumped_items
 
     def generate_once(self, messages: List[Dict[str, Any]], local_stop: List[str], max_response_tokens: int,
@@ -532,8 +686,12 @@ class StreamBase:
 
         The caller builds 'messages' and the conversational part of 'local_stop', because both are family specific -
         role-play adds the player's name as a stop so the model cannot speak for the user. Everything from there on is
-        the same for every family and lives here: merging in this architecture's own stops, splitting them, holding the
-        GPU lock for the call, and stripping reasoning out of the result.
+        the same for every family: generate_raw() merges in this architecture's own stops, splits them and holds the
+        GPU lock for the call, and this method then strips reasoning out of the result.
+
+        This deliberately takes no 'tools' argument. The role-play and knowledge-base families call this method, and
+        leaving the parameter off is what makes "they never offer the model tools" true by construction rather than by
+        every call site remembering not to pass one. The tool family calls generate_raw() instead.
 
         Args:
             messages: the assembled conversation to send.
@@ -549,6 +707,54 @@ class StreamBase:
         Raises:
             RuntimeError: if the models were released while this request was queued.
         """
+        full_response_content, answer_stop = self.generate_raw(messages, local_stop, max_response_tokens, reason_used,
+                                                               session_id, used_tokens)
+
+        # Strip any reasoning before the response goes any further, so that deliberation never reaches the client (or a
+        # text-to-speech voice), the vector database or the chat history, where it would be replayed to the model as
+        # though it were part of the conversation. This applies on a '!reason' turn too: only the answer is returned.
+        # 'thinking' is passed explicitly rather than read back from the model: the lock has been released by now, so
+        # another session may already have changed the generator's setting.
+        full_response_content = ChatTemplate.strip_reasoning(full_response_content, self.llm_generator, thinking=reason_used)
+        return ChatTemplate.truncate_at_stops(full_response_content, answer_stop)
+
+    def generate_raw(self, messages: List[Dict[str, Any]], local_stop: List[str], max_response_tokens: int,
+                     reason_used: bool, session_id: str, used_tokens: int,
+                     tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, List[str]]:
+        """
+        Runs one generation and returns the model's output untouched, with reasoning and any tool calls still in it.
+
+        This is the only place in the codebase that calls 'create_chat_completion'. generate_once() is built on it for
+        the families that just want an answer; the tool family calls it directly, for two reasons:
+
+          * It must parse tool calls out of the RAW text. strip_reasoning() cannot be run first: Muse-Glimmer addresses
+            a tool call to the tool ('to=get_datetime'), and the Harmony parser rightly treats every message not
+            addressed to the user as deliberation - so stripping first erases the call entirely. (CS-21, verified.)
+          * It is the only caller that offers the model tools.
+
+        'tools' is forwarded to the model ONLY when it is not None. When it is None the call is made with exactly the
+        arguments it had before this parameter existed, so the rendered prompt for role-play and the knowledge base is
+        unchanged. 'tool_choice' is never passed: in llama-cpp-python that switches on grammar-constrained output and
+        replaces the text with a synthesised call, whereas without it 'tools' only reaches the chat template, which
+        renders the definitions into the prompt, and the model's text comes back as-is for us to parse.
+
+        Args:
+            messages: the assembled conversation to send.
+            local_stop: the caller's conversational stop strings.
+            max_response_tokens: token budget for this generation.
+            reason_used: whether the model should reason on this generation.
+            session_id: for logging only.
+            used_tokens: for logging only.
+            tools: tool definitions in OpenAI function form, or None to offer none.
+
+        Returns:
+            Tuple[str, List[str]]: the raw generated text (without the stop string that ended it), and the stops that
+                split_stops() deferred to the answer - the caller applies them with truncate_at_stops() once it has
+                separated the answer from the reasoning.
+
+        Raises:
+            RuntimeError: if the models were released while this request was queued.
+        """
         # The hard-coded stops the caller passed cover ChatML and Llama-3 only. Gemma 4 ends a turn with '<turn|>' and
         # Muse Glimmer with '<|eot|>', neither of which appears there, so add this architecture's own.
         local_stop = local_stop + [stop for stop in self.architecture_stops if stop not in local_stop]
@@ -558,6 +764,16 @@ class StreamBase:
         generation_stop, answer_stop = ChatTemplate.split_stops(self.llm_generator, local_stop)
 
         logger.info(f"{ColoredText.BLUE_TEXT}Sending to the LLM generator for session_id {session_id} ... used_tokens: {used_tokens} generating_max_context_tokens: {self.argsDict['generating_max_context_tokens']} used_max_response_tokens: {max_response_tokens} reasoning: {reason_used and self.thinking_supported}{ColoredText.END_TEXT}")
+
+        completion_args = dict(
+            messages=messages,
+            max_tokens=max_response_tokens,
+            stream=False,
+            repeat_penalty = self.argsDict['repeat_penalty'],
+            stop=generation_stop
+        )
+        if tools is not None:
+            completion_args['tools'] = tools
 
         with self.generating_gpu_lock:
             # Checked INSIDE the lock: cleanup() sets this while holding the same lock, so a request that
@@ -570,21 +786,6 @@ class StreamBase:
             # happened to generate next.
             ChatTemplate.set_thinking(self.llm_generator, reason_used)
 
-            llama_response = self.llm_generator.create_chat_completion(
-                messages=messages,
-                max_tokens=max_response_tokens,
-                stream=False,
-                repeat_penalty = self.argsDict['repeat_penalty'],
-                stop=generation_stop
-            )
+            llama_response = self.llm_generator.create_chat_completion(**completion_args)
 
-        # Get the full response content directly
-        full_response_content = llama_response["choices"][0]["message"]["content"]
-
-        # Strip any reasoning before the response goes any further, so that deliberation never reaches the client (or a
-        # text-to-speech voice), the vector database or the chat history, where it would be replayed to the model as
-        # though it were part of the conversation. This applies on a '!reason' turn too: only the answer is returned.
-        # 'thinking' is passed explicitly rather than read back from the model: the lock has been released by now, so
-        # another session may already have changed the generator's setting.
-        full_response_content = ChatTemplate.strip_reasoning(full_response_content, self.llm_generator, thinking=reason_used)
-        return ChatTemplate.truncate_at_stops(full_response_content, answer_stop)
+        return llama_response["choices"][0]["message"]["content"], answer_stop

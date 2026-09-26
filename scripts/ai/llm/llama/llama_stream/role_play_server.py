@@ -14,7 +14,12 @@ class RolePlayServer:
         self.args_dict = argsDict
 
         self.model = RolePlayStream(argsDict)
-        self.server = AmadeoServer(argsDict['host'], argsDict['port'], additional_client_functionality = self.model.handle_client_request, additional_shutdown = self.model.remove_session)
+        # client_idle_timeout_seconds (server config): how long an idle client is kept; 0 = never, with TCP keepalive
+        # noticing a client that vanished. A config without it keeps AmadeoServer's 300 seconds.
+        self.server = AmadeoServer(argsDict['host'], argsDict['port'],
+                                   client_timeout=argsDict.get('client_idle_timeout_seconds', AmadeoServer.CLIENT_TIMEOUT),
+                                   additional_client_functionality = self.model.handle_client_request,
+                                   additional_shutdown = self.model.remove_session)
 
 
 

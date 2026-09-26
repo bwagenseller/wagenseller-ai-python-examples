@@ -118,12 +118,18 @@ class RolePlayStream(StreamBase):
                 self.sessions[session_id]['used_tokens'] = 0
                 self.sessions[session_id]['max_useable_tokens'] = (1 - self.argsDict['buffer_context_pcnt']) * self.argsDict['generating_max_context_tokens']  # shave a bit off the top to accommodate the buffer
                 self.sessions[session_id]['full_history_fits'] = True
-                self.sessions[session_id]['convo_dir'] = os.path.join(self.argsDict['base_convo_dir'], user_id, system_prompt_id)
+                # user_id and system_prompt_id come from the client and become directory / file names: only safe names
+                # are used as such (see LlamaUtils.is_safe_name). An unsafe one fails the session below, and meanwhile
+                # stands in as a fixed placeholder so no path is ever built from it (e.g. '../../somewhere').
+                prompt_path = LlamaUtils.safe_prompt_path(self.argsDict['system_prompt_dir'], system_prompt_id)
+                safe_user = user_id if LlamaUtils.is_safe_name(user_id) else '_invalid_user_'
+                safe_prompt = system_prompt_id if prompt_path else '_invalid_prompt_'
+                self.sessions[session_id]['convo_dir'] = os.path.join(self.argsDict['base_convo_dir'], safe_user, safe_prompt)
                 self.sessions[session_id]['fatal_errors'] = ''
                 self.sessions[session_id]['db'] = VectorDB(self.llm_embedder, self.embedding_gpu_lock, self.llm_generator, self.generating_gpu_lock, self.model_type, self.sessions[session_id]['convo_dir'], self.argsDict['debug'], self.passphrase)
                 self.sessions[session_id]['chat_history'] = []
 
-                system_message = LlamaUtils.get_system_message(os.path.join(self.argsDict['system_prompt_dir'], system_prompt_id + '.txt'))
+                system_message = LlamaUtils.get_system_message(prompt_path) if prompt_path else LlamaUtils.BASE_SYSTEM_MESSAGE
 
                 if not player_name:
                     # If there is no given player name, take the line out of the system prompt that identifies the player
@@ -138,9 +144,9 @@ class RolePlayStream(StreamBase):
                     self.sessions[session_id]['system_tokens'] = LlamaUtils.universal_token_count(self.llm_generator, "system", self.sessions[session_id]['system_message'], self.model_type)
 
                 # now do some user validation
-                if not user_id:
+                if not user_id or not LlamaUtils.is_safe_name(user_id):
                     self.sessions[session_id]['fatal_errors'] += ' user_id is invalid.'
-                if not system_prompt_id:
+                if not system_prompt_id or not prompt_path:
                     self.sessions[session_id]['fatal_errors'] += ' system_prompt_id is invalid.'
 
                 # Create the lock for this session
@@ -363,124 +369,42 @@ class RolePlayStream(StreamBase):
                 return response
 
 
-            # Construct messages list for GENERATOR LLM, including system message, context, and chat history
-            # Initialize messages_for_llm with the system message
-            messages_for_llm = [{"role": "system", "content": mySessionDict['system_message']}]
+            # Construct messages list for GENERATOR LLM: system message, then either the whole chat history (while it
+            # still fits) or vector-database context plus as much recent history as fits, then this request. The
+            # budgeting is shared with the other families; only the vector search is role-play's own, since it honours
+            # the '!ignoreme' / '!ignoreyou' options. See StreamBase.assemble_context.
+            assembled = self.assemble_context(
+                mySessionDict, mySessionDict['system_message'], user_input, used_tokens,
+                mySessionDict['max_useable_tokens'], think_used,
+                lambda min_score, max_tokens, top_k: self.get_relevant_items_from_db(
+                    mySessionDict, user_input, ignore_user_in_vector_db, ignore_assistant_in_vector_db,
+                    min_score, max_tokens, top_k),
+                use_full_history_when_it_fits=True)
+            messages_for_llm, used_tokens = assembled.messages, assembled.used_tokens
 
-            if mySessionDict['full_history_fits']:
-                total_history_tokens = sum(d['token_count'] for d in mySessionDict['chat_history'])
-                # if the total tokens for the history is less than the max context, just use the entire history
-                if used_tokens + total_history_tokens <= mySessionDict['max_useable_tokens']:
-                    # remove 'token_count'
-                    formatted_chat_history = [
-                        {'role': d['role'], 'content': d['content']}
-                        for d in mySessionDict['chat_history']
-                    ]
-                    messages_for_llm.extend(formatted_chat_history)
-
-                    used_tokens += total_history_tokens
-
-                    # If we wish to see the chat history, print it
-                    if chat_history_review:
-                        dumped_items = self.format_history_dump(mySessionDict['chat_history'])
-                        if mySessionDict['spoken_response']:
-                            # Really we should never get to this as spoken responses cannot review the chat history, but just in case...
-                            response = {
-                                'success': True,
-                                'type': 'llm_response',
-                                "response": "I'm sorry, I was lost in thought. What did you say, again?",
-                                "message": '',
-                                "elapsed_time": time.time() - start_time,
-                                'file_size': 0
-                            }
-                        else:
-                            response = {
-                                'success': True,
-                                'type': 'llm_response',
-                                "response": dumped_items,
-                                "message": "",
-                                "elapsed_time": time.time() - start_time,
-                                'file_size': 0
-                            }
-                        return response
-
-
+            # If we wish to see the chat history, send what WOULD have gone to the model instead of generating
+            if chat_history_review:
+                dumped_items = self.format_history_dump(assembled.history_used)
+                if mySessionDict['spoken_response']:
+                    # Really we should never get to this as spoken responses cannot review the chat history, but just in case...
+                    response = {
+                        'success': True,
+                        'type': 'llm_response',
+                        "response": "I'm sorry, I was lost in thought. What did you say, again?",
+                        "message": '',
+                        "elapsed_time": time.time() - start_time,
+                        'file_size': 0
+                    }
                 else:
-                    mySessionDict['full_history_fits'] = False
-
-
-            # if the full history does not fit, we must use the vector database
-            if not mySessionDict['full_history_fits']:
-                # Search the vector database for relevant context
-
-
-                # we need to set some things depending on if the user wants the LLM to 'really think'
-                if think_used:
-                    logger.info(f"{ColoredText.CYAN_TEXT}Going far back in memory for session_id {mySessionDict['session_id']}...{ColoredText.END_TEXT}")
-                    max_vector_db_tokens = .85 * (mySessionDict['max_useable_tokens'] - used_tokens) # this used to be 'max_vector_database_pcnt * max_useable_tokens', but long system prompts messed with this, so we capture this now, taking into account used_tokens
-                    temp_top_k = 25 # set this very high to accommodate more returns
-                    temp_min_vector_db_score = .05
-
-                else:
-                    # normal run
-                    max_vector_db_tokens = self.argsDict['max_vector_database_pcnt'] * (mySessionDict['max_useable_tokens'] - used_tokens) # this used to be 'max_vector_database_pcnt * max_useable_tokens', but long system prompts messed with this, so we capture this now, taking into account used_tokens
-                    temp_top_k = self.argsDict['top_k']
-                    temp_min_vector_db_score = self.argsDict['min_vector_db_score']
-
-
-                # determine if there were relevant items from the vector DB
-                db_items, db_tokens = self.get_relevant_items_from_db(mySessionDict, user_input, ignore_user_in_vector_db, ignore_assistant_in_vector_db, temp_min_vector_db_score, max_vector_db_tokens, temp_top_k)
-
-                # if there were DB items
-                if db_items:
-                    messages_for_llm.extend(db_items)
-
-                    # add in the token count from the vector db results
-                    used_tokens += db_tokens
-
-
-                # Finally, add on the chat history - used_tokens is now the sum of the new user request, the system message, the preemptive assistant response, and the vector db entries
-                abridged_chat_history, abridged_chat_history_tokens = LlamaUtils.fit_to_token_limit(mySessionDict['chat_history'], mySessionDict['max_useable_tokens'] - used_tokens)
-
-                # Add in the abridged chat history tokens
-                used_tokens += abridged_chat_history_tokens
-
-                # If we wish to see the chat history, send it
-                if chat_history_review:
-                    dumped_items = self.format_history_dump(abridged_chat_history)
-                    if mySessionDict['spoken_response']:
-                        # Really we should never get to this as spoken responses cannot review the chat history, but just in case...
-                        response = {
-                            'success': True,
-                            'type': 'llm_response',
-                            "response": "I'm sorry, I was lost in thought. What did you say, again?",
-                            "message": '',
-                            "elapsed_time": time.time() - start_time,
-                            'file_size': 0
-                        }
-                    else:
-                        response = {
-                            'success': True,
-                            'type': 'llm_response',
-                            "response": dumped_items,
-                            "message": "",
-                            "elapsed_time": time.time() - start_time,
-                            'file_size': 0
-                        }
-                    return response
-
-
-                # remove 'token_count'
-                formatted_chat_history = [
-                    {'role': d['role'], 'content': d['content']}
-                    for d in abridged_chat_history
-                ]
-
-                # store in messages_for_llm
-                messages_for_llm.extend(formatted_chat_history)
-
-            # Finally, append the most recent content; remember to remove any instruction delimiters if they exist (but leave the instructions intact)
-            messages_for_llm.append({"role": "user", "content": LlamaUtils.remove_instruction_delimiters(user_input, RolePlayStream.HIDDEN_INSTRUCTION_DELIMITER)})
+                    response = {
+                        'success': True,
+                        'type': 'llm_response',
+                        "response": dumped_items,
+                        "message": "",
+                        "elapsed_time": time.time() - start_time,
+                        'file_size': 0
+                    }
+                return response
 
 
             if not chat_history_review:
@@ -706,31 +630,21 @@ class RolePlayStream(StreamBase):
             logger.info(f"{ColoredText.BLUE_TEXT}Chat history not long enough to stroke last conversation for session_id {sessionDict['session_id']}.{ColoredText.END_TEXT}")
 
     ################################################################################ Save and Load ####################################################################################################################
-    def save(self, sessionDict: Dict):
-        """
-        This MUST be called from within a lock on self.session_locks[session_id]!
-
-        :param local_chat_history:
-        :return:
-        """
-        sessionDict['db'].save_session(sessionDict['chat_history'])
-
-
     def load_chat_history(self, sessionDict: Dict, load_previous: bool)->list:
         """
         This MUST be called from within a lock on self.session_locks[session_id]!
 
         (Re)Load chat history
         """
-        sessionDict['chat_history'] = []
         with (self.generating_gpu_lock):
             static_response_tokens = LlamaUtils.universal_token_count(self.llm_generator, "assistant", VectorDB.ASSISTANT_RESPONSE, self.model_type)
 
+        # Resetting the history and restoring a saved conversation is shared with the other families - see
+        # StreamBase.load_chat_history. What follows is role-play's own: its initial knowledge-base documents.
+        super().load_chat_history(sessionDict, load_previous)
 
         if os.path.exists(sessionDict['convo_dir']):
             if load_previous:
-                sessionDict['chat_history'] = sessionDict['db'].load_session()  # db.df will be updated internally by load_session
-
                 # Re-add initial knowledge base documents if they are not already in the loaded DB.
                 # This ensures they are always present, even if a partial DB was saved/loaded.
                 # A more robust check might involve comparing document hashes or IDs.

@@ -14,9 +14,9 @@ SETUP (run these in your terminal first):
   If chromium then fails to start on a missing shared library, install its system
   deps with: sudo python -m playwright install-deps chromium
 
-  This script also needs SECRETS_FILE set in the SHELL environment (not in the
-  .env itself) - it is read via os.getenv BEFORE load_dotenv() runs, and points at
-  the .env holding the INFINITE_CAMPUS_* credentials. See .env.example.
+  The INFINITE_CAMPUS_* settings (credentials, URLs, email) come from a .env file:
+  pass it with --secrets-file PATH, or set SECRETS_FILE in the SHELL environment
+  (not in the .env itself) to point at it. --secrets-file wins if both are given.
 
 HOW TO RUN:
   python infinitecampus.py
@@ -32,7 +32,12 @@ python infinitecampus.py --print --term T1              # T1 grades
 python infinitecampus.py --print --days 7               # only last 7 days of assignments
 python infinitecampus.py --email --term T2 --days 30    # email with 30 days of assignments
 python infinitecampus.py --json --term T3               # JSON for T3
+python infinitecampus.py --json --secrets-file ~/.secrets/ic.env   # settings from a given .env
+python infinitecampus.py --print --show-browser         # watch the login in a visible browser
 python infinitecampus.py --help                         # see all options
+
+If every login attempt fails, nothing is printed to stdout, no email is sent, and the exit code is 1
+(it used to print or email an empty summary, which read as "no grades").
 """
 
 from playwright.sync_api import sync_playwright
@@ -42,30 +47,56 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 import json
 import time
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 import os
+import sys
 
 # ─────────────────────────────────────────────
 # 🔧 CONFIGURATION — fill these in!
 # ─────────────────────────────────────────────
 
-SECRETS_FILE=os.getenv("SECRETS_FILE")
-load_dotenv(SECRETS_FILE)
+# The settings - credentials, the Infinite Campus URLs, email settings - come from a .env file: the one given with
+# --secrets-file, else the one the SECRETS_FILE environment variable names (else python-dotenv looks for a '.env' in
+# the current folder and its parents). A variable already set in the shell wins over the file.
+SETTING_NAMES = (
+    "INFINITE_CAMPUS_MS_SSO_LOGIN", "INFINITE_CAMPUS_MS_SSO_PASSWORD",
+    "INFINITE_CAMPUS_FROM_EMAIL", "INFINITE_CAMPUS_FROM_PASSWORD", "INFINITE_CAMPUS_EMAIL_RECIPIENTS",
+    "INFINITE_CAMPUS_LOGIN_URL", "INFINITE_CAMPUS_GRADES_API", "INFINITE_CAMPUS_ASSIGN_API",
+    # Optional: the student's name, put at the front of the email subject. Kept in the .env, not in this script.
+    "INFINITE_CAMPUS_STUDENT_NAME",
+)
 
-INFINITE_CAMPUS_MS_SSO_LOGIN = os.getenv("INFINITE_CAMPUS_MS_SSO_LOGIN")
-INFINITE_CAMPUS_MS_SSO_PASSWORD = os.getenv("INFINITE_CAMPUS_MS_SSO_PASSWORD")
-INFINITE_CAMPUS_FROM_EMAIL = os.getenv("INFINITE_CAMPUS_FROM_EMAIL")
-INFINITE_CAMPUS_FROM_PASSWORD = os.getenv("INFINITE_CAMPUS_FROM_PASSWORD")
-INFINITE_CAMPUS_EMAIL_RECIPIENTS = os.getenv("INFINITE_CAMPUS_EMAIL_RECIPIENTS")
-INFINITE_CAMPUS_LOGIN_URL = os.getenv("INFINITE_CAMPUS_LOGIN_URL")
-INFINITE_CAMPUS_GRADES_API = os.getenv("INFINITE_CAMPUS_GRADES_API")
-INFINITE_CAMPUS_ASSIGN_API = os.getenv("INFINITE_CAMPUS_ASSIGN_API")
+
+def load_settings(secrets_file=None):
+    """
+    Loads every setting in SETTING_NAMES into this module's globals (INFINITE_CAMPUS_MS_SSO_LOGIN, ...).
+
+    dotenv_values READS the file without copying it into os.environ (load_dotenv did): the credentials then live only
+    in these variables, and are not inherited by every process this script starts - Playwright's driver and each
+    Chromium process. A variable already set in the environment still wins over the file, as it did with load_dotenv.
+
+    Args:
+        secrets_file (str | None): The .env to read; None lets python-dotenv search for a '.env'.
+
+    Raises:
+        FileNotFoundError: if secrets_file is given but does not exist.
+    """
+    if secrets_file and not os.path.isfile(secrets_file):
+        raise FileNotFoundError(f"secrets file not found: {secrets_file}")
+    values = dotenv_values(secrets_file)
+    for name in SETTING_NAMES:
+        globals()[name] = os.environ.get(name, values.get(name))
+
+
+SECRETS_FILE = os.getenv("SECRETS_FILE")
+load_settings(SECRETS_FILE)     # at import, so code that imports this module (the CS-21 get_grades tool) has them
 
 TARGET_TERM     = "T3"   # Change to "T1" or "T3" if needed
 ASSIGNMENT_DAYS = 14     # How many days back to show assignments
 
-# Set to False to watch the browser (good for debugging), True to run silently
-HEADLESS = False
+# True runs the browser without a window (the default since 2026-09-26 - the site accepts a headless browser, tested
+# live). --show-browser on the command line opens a visible one for a run, to watch the login (good for debugging).
+HEADLESS = True
 
 # ─────────────────────────────────────────────
 
@@ -337,7 +368,8 @@ def send_email(body, target_term):
     msg = MIMEMultipart()
     msg["From"] = INFINITE_CAMPUS_FROM_EMAIL
     msg["To"] = INFINITE_CAMPUS_EMAIL_RECIPIENTS
-    msg["Subject"] = f"Jackson - Grades and Assignments ({target_term}) — {datetime.now().strftime('%b %d, %Y')}"
+    prefix = f"{INFINITE_CAMPUS_STUDENT_NAME} - " if INFINITE_CAMPUS_STUDENT_NAME else ""
+    msg["Subject"] = f"{prefix}Grades and Assignments ({target_term}) — {datetime.now().strftime('%b %d, %Y')}"
     msg.attach(MIMEText(body, "plain"))
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
@@ -387,7 +419,6 @@ def build_json_output(courses, assignments, target_term):
 
 
 def main():
-    import sys
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -426,9 +457,34 @@ def main():
         help=f"How many days back to show assignments (default: {ASSIGNMENT_DAYS}).",
     )
 
+    parser.add_argument(
+        "--show-browser",
+        action="store_true",
+        help="Open a visible browser window instead of running headless (to watch the login; needs a display).",
+    )
+    parser.add_argument(
+        "--secrets-file",
+        default=None,
+        help="The .env holding the INFINITE_CAMPUS_* settings (default: the file the SECRETS_FILE environment "
+             "variable names).",
+    )
+
     args = parser.parse_args()
+    if args.show_browser:
+        global HEADLESS
+        HEADLESS = False
+    if args.secrets_file:
+        try:
+            load_settings(args.secrets_file)
+        except FileNotFoundError as e:
+            print(f"{e}", file=sys.stderr)
+            sys.exit(2)
 
     grades_data, assignments_data = login_and_fetch()
+    if grades_data is None and assignments_data is None:
+        # Never report "no grades" when the truth is "could not log in": print nothing, send no email, exit 1.
+        print("Could not fetch anything from Infinite Campus; nothing printed or sent.", file=sys.stderr)
+        sys.exit(1)
     courses = parse_grades(grades_data, args.term)
     assignments = parse_assignments(assignments_data, args.days)
 

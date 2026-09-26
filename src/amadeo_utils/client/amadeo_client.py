@@ -80,7 +80,8 @@ class AmadeoClient:
 
     PERSISTENT_RESPONSE_TIMEOUT = 30
 
-    def __init__(self, host='localhost', port=8888, additional_server_response_functionality: Optional[Callable[[Dict[str, Any], Optional[bytes]], None]]  = None, session_id: str = '', request_id: str = '', persistent_request_timeout: int = PERSISTENT_RESPONSE_TIMEOUT):
+    def __init__(self, host='localhost', port=8888, additional_server_response_functionality: Optional[Callable[[Dict[str, Any], Optional[bytes]], None]]  = None, session_id: str = '', request_id: str = '', persistent_request_timeout: int = PERSISTENT_RESPONSE_TIMEOUT,
+                 interim_response_functionality: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None):
         """
         Initialize the client
 
@@ -92,6 +93,13 @@ class AmadeoClient:
                                             will return nothing (as nothing is needed for a simple client). Refer to the JSON descriptions above for what the client needs to send to the server / the basics of what it should expect in return
             session_id: if you wish to _attempt_ to establish the sessionID you may do so. This is helpful if you want to use the same sessionID throughout several different services. Be warned, though, that the server may not be able to accommodate the request if another session has that ID
             persistent_request_timeout: The timeout, in seconds, of a persistent request.
+            interim_response_functionality: Called when the server sends an INTERIM message part-way through a request -
+                                            one marked "interim": true, such as the tool server's 'approval_request'
+                                            (CS-21). It receives that message and returns the fields to send back (for
+                                            an approval: {'command': 'approval_response', 'answer': 'y'}). The request
+                                            then carries on waiting for its real response. Without one, an approval is
+                                            answered "no" at once, so a client that knows nothing about approvals can
+                                            never leave a server waiting.
         """
         self.host = host
         self.port = port
@@ -100,6 +108,10 @@ class AmadeoClient:
         self.session_id = session_id
         self.request_id = request_id
         self.persistent_request_timeout = persistent_request_timeout
+        # The exception behind the last failed persistent request (None after a success), so a caller can tell "the
+        # server closed the connection" from "the server is taking too long" - both return (None, None).
+        self.last_error = None
+        self.interim_response_functionality = interim_response_functionality
 
         if additional_server_response_functionality is not None:
             self.additional_server_response_functionality = additional_server_response_functionality
@@ -120,10 +132,12 @@ class AmadeoClient:
             self.client_socket.settimeout(self.persistent_request_timeout)
             self.client_socket.connect((self.host, self.port))
 
-            # Send establish_connection request
+            # Send establish_connection request. close_connection() leaves session_id as None, and a None here would be
+            # granted by the server as a session literally named None, which this client then treats as no session at
+            # all - so reconnecting after a close never worked. '' (the constructor's default) asks for a new session.
             request_data = {
                 'persistent': True,
-                'sessionID': self.session_id,
+                'sessionID': self.session_id or '',
                 'requestID': self.request_id,
                 'command': 'establish_connection',
                 'message': 'Requesting persistent connection',
@@ -257,8 +271,10 @@ class AmadeoClient:
         Returns:
             tuple: (response_dict, binary_data) or (None, None) if failed
         """
+        self.last_error = None
         if not self.is_persistent or not self.session_id or not self.client_socket:
             logger.error("No persistent connection established")
+            self.last_error = ConnectionError("no persistent connection established")
             return None, None
 
         try:
@@ -280,6 +296,16 @@ class AmadeoClient:
             # Receive response
             response, raw_data = self.receive_response()
 
+            # The server may ask something part-way through a request (CS-21: the tool server asking the user to approve
+            # a tool call). Answer each interim message and keep waiting; the request's real response comes after.
+            while response is not None and response.get('interim'):
+                reply = self.interim_response_functionality(response) if self.interim_response_functionality else None
+                if reply is None:
+                    reply = {'command': 'approval_response', 'answer': 'no'}
+                self.send_request_data(dict({'persistent': True, 'sessionID': self.session_id,
+                                             'requestID': self.request_id}, **reply))
+                response, raw_data = self.receive_response()
+
             # Handle response through callback
             if self.additional_server_response_functionality:
                 self.additional_server_response_functionality(response, raw_data)
@@ -288,6 +314,7 @@ class AmadeoClient:
 
         except Exception as e:
             logger.error(f"Persistent request failed: {e}")
+            self.last_error = e
             return None, None
 
     def send_transient_request(self, command, message='', binary_data=None, **kwargs):

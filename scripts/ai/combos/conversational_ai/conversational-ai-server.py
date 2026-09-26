@@ -1,3 +1,4 @@
+import sys
 import logging
 from amadeo_utils.ai.combined.conversational_ai.conversational_ai import ConversationalAiServer
 
@@ -55,4 +56,6 @@ class ConversationalAiPipelineServer:
 if __name__ == "__main__":
 
     argsDict = ConversationalAiServer.get_args_dict_server()
+    if not argsDict:
+        sys.exit(1)                 # the reason (bad arguments or an invalid setting) has already been logged
     server = ConversationalAiPipelineServer(argsDict)

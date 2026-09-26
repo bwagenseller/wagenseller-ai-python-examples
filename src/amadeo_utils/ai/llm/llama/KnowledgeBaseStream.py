@@ -261,44 +261,21 @@ class KnowledgeBaseStream(StreamBase):
                 return response
 
 
-            # Construct messages list for GENERATOR LLM, including system message, context, and chat history
-            # Initialize messages_for_llm with the system message
-            messages_for_llm = [{"role": "system", "content": self.argsDict['system_message']}]
+            # Construct messages list for GENERATOR LLM: system message, vector-database context, as much recent chat
+            # history as fits, then this request. The knowledge base never sends the whole history - its vector
+            # database holds the knowledge base itself, which must be searched every turn. See
+            # StreamBase.assemble_context.
+            assembled = self.assemble_context(
+                mySessionDict, self.argsDict['system_message'], user_input, used_tokens,
+                self.max_useable_tokens, think_used,
+                lambda min_score, max_tokens, top_k: self.get_relevant_items_from_db(
+                    mySessionDict, user_input, min_score, max_tokens, top_k),
+                use_full_history_when_it_fits=False)
+            messages_for_llm, used_tokens = assembled.messages, assembled.used_tokens
 
-            # we need to set some things depending on if the user wants the LLM to 'really think'
-            if think_used:
-                logger.info(f"{ColoredText.CYAN_TEXT}Going far back in memory for session_id {mySessionDict['session_id']}...{ColoredText.END_TEXT}")
-                max_vector_db_tokens = .85 * (self.max_useable_tokens - used_tokens) # this used to be 'max_vector_database_pcnt * max_useable_tokens', but long system prompts messed with this, so we capture this now, taking into account used_tokens
-                temp_top_k = 25 # set this very high to accommodate more returns
-                temp_min_vector_db_score = .05
-
-            else:
-                # normal run
-                max_vector_db_tokens = self.argsDict['max_vector_database_pcnt'] * (self.max_useable_tokens - used_tokens) # this used to be 'max_vector_database_pcnt * max_useable_tokens', but long system prompts messed with this, so we capture this now, taking into account used_tokens
-                temp_top_k = self.argsDict['top_k']
-                temp_min_vector_db_score = self.argsDict['min_vector_db_score']
-
-
-            # determine if there were relevant items from the vector DB
-            db_items, db_tokens = self.get_relevant_items_from_db(mySessionDict, user_input, temp_min_vector_db_score, max_vector_db_tokens, temp_top_k)
-
-            # if there were DB items
-            if db_items:
-                messages_for_llm.extend(db_items)
-
-                # add in the token count from the vector db results
-                used_tokens += db_tokens
-
-
-            # Finally, add on the chat history - used_tokens is now the sum of the new user request, the system message, the preemptive assistant response, and the vector db entries
-            abridged_chat_history, abridged_chat_history_tokens = LlamaUtils.fit_to_token_limit(mySessionDict['chat_history'], self.max_useable_tokens - used_tokens)
-
-            # Add in the abridged chat history tokens
-            used_tokens += abridged_chat_history_tokens
-
-            # If we wish to see the chat history, send it
+            # If we wish to see the chat history, send what WOULD have gone to the model instead of generating
             if chat_history_review:
-                dumped_items = self.format_history_dump(abridged_chat_history)
+                dumped_items = self.format_history_dump(assembled.history_used)
                 if mySessionDict['spoken_response']:
                     # Really we should never get to this as spoken responses cannot review the chat history, but just in case...
                     response = {
@@ -319,19 +296,6 @@ class KnowledgeBaseStream(StreamBase):
                         'file_size': 0
                     }
                 return response
-
-
-            # remove 'token_count'
-            formatted_chat_history = [
-                {'role': d['role'], 'content': d['content']}
-                for d in abridged_chat_history
-            ]
-
-            # store in messages_for_llm
-            messages_for_llm.extend(formatted_chat_history)
-
-            # Finally, append the most recent content; remember to remove any instruction delimiters if they exist (but leave the instructions intact)
-            messages_for_llm.append({"role": "user", "content": LlamaUtils.remove_instruction_delimiters(user_input, KnowledgeBaseStream.HIDDEN_INSTRUCTION_DELIMITER)})
 
 
             if not chat_history_review:

@@ -25,6 +25,10 @@ class ConversationalAiServer:
     TTS_PORT = 8888
     LLM_HOST = 'localhost'
     LLM_PORT = 65440
+    # How long to wait for the LLM server's reply to one request. 120 s suits role-play and the knowledge base; the
+    # agent server can take longer (web lookups, a login, several tool rounds - up to its max_turn_seconds, 180 by
+    # default), so raise it in the config ('llm_response_timeout_seconds') when this server talks to the agent server.
+    LLM_RESPONSE_TIMEOUT_SECONDS = 120
 
     def __init__(self, argsDict: dict):
         self.args_dict = argsDict
@@ -50,6 +54,7 @@ class ConversationalAiServer:
         self.tts_port = argsDict['tts_port']
         self.llm_host = argsDict['llm_host']
         self.llm_port = argsDict['llm_port']
+        self.llm_response_timeout = argsDict.get('llm_response_timeout_seconds', ConversationalAiServer.LLM_RESPONSE_TIMEOUT_SECONDS)
 
         self.server = AmadeoServer(argsDict['host'], argsDict['port'],
                                  synchronous=False,
@@ -179,7 +184,7 @@ class ConversationalAiServer:
         with self.session_to_llm_client_lock:
             if session_id not in self.session_to_llm_client_map:
                 logger.info(f"{ColoredText.BLUE_TEXT}Creating a LLM client for sessionID {session_id} to LLM host {self.llm_host} and LLM port {self.llm_port}.{ColoredText.END_TEXT}")
-                llm_client = AmadeoClient( self.llm_host, self.llm_port, additional_server_response_functionality=self.handle_llm_server_response, session_id = session_id, request_id = request_id, persistent_request_timeout=120)
+                llm_client = AmadeoClient( self.llm_host, self.llm_port, additional_server_response_functionality=self.handle_llm_server_response, session_id = session_id, request_id = request_id, persistent_request_timeout=self.llm_response_timeout)
 
 
                 llm_client_lock = threading.Lock() # use this lock to interact with the asr client as well
@@ -632,7 +637,8 @@ class ConversationalAiServer:
             'llm_host': str,
             'llm_port': int,
             'tts_host': str,
-            'tts_port': int
+            'tts_port': int,
+            'llm_response_timeout_seconds': (int, float)
         }
 
         if not os.path.exists(filepath):
@@ -694,6 +700,7 @@ class ConversationalAiServer:
 
         parser.add_argument('--llm-host', default=ConversationalAiServer.LLM_HOST, help='The LLM server host address (default: localhost)')
         parser.add_argument('--llm-port', type=int, default=ConversationalAiServer.LLM_PORT, help=f"The LLM server port number (default: {ConversationalAiServer.LLM_PORT})")
+        parser.add_argument('--llm-response-timeout-seconds', type=float, default=ConversationalAiServer.LLM_RESPONSE_TIMEOUT_SECONDS, help=f"How long to wait for the LLM server's reply to one request (default: {ConversationalAiServer.LLM_RESPONSE_TIMEOUT_SECONDS}). Raise it for the agent server, whose turns can take longer.")
 
         parser.add_argument("--json", type=str, default="", help="If this points to a valid JSON file, the ENTIRE parameter settings are pulled from that file, and the defaults - and other arguments passed from the command line - are ignored. If the JSON load fails for whatever reason, though, the defaults WILL be engaged. Just remember that if there is a dash in the arg name, its going to be an underscore in the JSON.")
 
@@ -714,13 +721,14 @@ class ConversationalAiServer:
                     argDict['port'] = config_dict.get('port', ConversationalAiServer.PORT)
 
                     argDict['asr_host'] = config_dict.get('asr_host', ConversationalAiServer.ASR_HOST)
-                    argDict['asr_port'] = config_dict.get('asr_port', ConversationalAiServer.ASR_HOST)
+                    argDict['asr_port'] = config_dict.get('asr_port', ConversationalAiServer.ASR_PORT)
 
                     argDict['tts_host'] = config_dict.get('tts_host', ConversationalAiServer.TTS_HOST)
-                    argDict['tts_port'] = config_dict.get('tts_port', ConversationalAiServer.TTS_HOST)
+                    argDict['tts_port'] = config_dict.get('tts_port', ConversationalAiServer.TTS_PORT)
 
                     argDict['llm_host'] = config_dict.get('llm_host', ConversationalAiServer.LLM_HOST)
-                    argDict['llm_port'] = config_dict.get('llm_port', ConversationalAiServer.LLM_HOST)
+                    argDict['llm_port'] = config_dict.get('llm_port', ConversationalAiServer.LLM_PORT)
+                    argDict['llm_response_timeout_seconds'] = config_dict.get('llm_response_timeout_seconds', ConversationalAiServer.LLM_RESPONSE_TIMEOUT_SECONDS)
 
                     logger.info(f"Config loaded from JSON {json_config_file}.")
 
@@ -744,6 +752,7 @@ class ConversationalAiServer:
 
                 argDict['llm_host'] = args.llm_host
                 argDict['llm_port'] = args.llm_port
+                argDict['llm_response_timeout_seconds'] = args.llm_response_timeout_seconds
 
         except SystemExit as e:
             argDict = {}
@@ -752,5 +761,12 @@ class ConversationalAiServer:
                 print(f"Thank you!")
             else:
                 logger.error(f"Invalid arguments.")
+
+        # A socket timeout of 0 would make every read non-blocking, and a negative one is an error: a reply timeout
+        # must be a positive number of seconds.
+        timeout = argDict.get('llm_response_timeout_seconds')
+        if argDict and (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0):
+            logger.error(f"llm_response_timeout_seconds must be a positive number of seconds, not {timeout!r}.")
+            argDict = {}
 
         return argDict

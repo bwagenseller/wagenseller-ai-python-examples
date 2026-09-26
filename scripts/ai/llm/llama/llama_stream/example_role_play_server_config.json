@@ -1,6 +1,7 @@
 {
     "host": "127.0.0.1",
     "port": 65440,
+    "client_idle_timeout_seconds": 300,
 
     "base_model_dir": "/home/kevin/ai/models/llama.cpp",
     "base_embedding_dir": "/home/kevin/ai/models/llama.cpp/embedding_models",
