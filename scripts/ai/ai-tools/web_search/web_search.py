@@ -25,6 +25,10 @@ Config (web_search.json in your tool config folder - outside the repo):
 Usage:
     web_search.py --describe
     echo '{"query": "national weather service api"}' | web_search.py --config web_search.json
+
+Errors: "no results" means the engines answered and found nothing. When nothing came back AND SearXNG reports
+engines that did not answer (rate-limited, suspended - for minutes, per its search.suspended_times - or blocked by a
+CAPTCHA), the error says web search is temporarily unavailable instead, so the model does not keep retrying.
 """
 import requests
 
@@ -36,6 +40,12 @@ MAX_SNIPPET_CHARS = 400        # snippets are for choosing what to fetch, not fo
 MAX_QUERY_CHARS = 300
 HTTP_TIMEOUT = (5, 15)
 TIME_RANGES = ("day", "week", "month", "year")
+# Said instead of "no results" when SearXNG reports that its engines did not answer (rate-limited, suspended, timed
+# out). Seen live 2026-09-26: with every engine suspended, "no results" made workers rephrase and search again and
+# again - more requests to engines that were already refusing, and a user left wondering why nothing was found. This
+# text reaches both the model and the user (read aloud on voice), so it names no engines and asks for no retries.
+ENGINES_DOWN = ("the search engines are temporarily unavailable (rate-limited or not responding); "
+                "searching again now will not help - tell the user web search is down for the moment")
 
 DEFINITION = {
     "name": "web_search",
@@ -110,6 +120,10 @@ def handle(arguments, config):
             break
     answers = [str(a.get("answer", a)) if isinstance(a, dict) else str(a) for a in data.get("answers", [])][:2]
     if not results and not answers:
+        # SearXNG lists the engines that failed this query as [name, reason] pairs. Nothing found while some of them
+        # failed is an outage, not an answer: say so, so the worker stops instead of rephrasing and retrying.
+        if data.get("unresponsive_engines"):
+            raise ToolError(ENGINES_DOWN)
         raise ToolError("no results")
     # The history line says what was searched and how much came back - never a title or snippet, which strangers wrote.
     summary = f"{len(results)} result{'s' if len(results) != 1 else ''} for {query!r}"
