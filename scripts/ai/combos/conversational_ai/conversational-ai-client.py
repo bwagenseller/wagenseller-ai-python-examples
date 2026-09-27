@@ -8,6 +8,7 @@ import argparse
 import time
 import wave
 import io
+import socket
 import pygame
 
 
@@ -41,6 +42,11 @@ class ConversationalAiPipelineClient:
     USER_ID = 'Bob'
     CONTINUOUS_SAVE = False
     LOAD_PREVIOUS = True
+    # How long to wait for the server's reply to one spoken request. One reply covers ASR, the whole LLM turn and TTS,
+    # so this must exceed the server's own 'llm_response_timeout_seconds' (120 s by default; an agent turn can run up
+    # to its max_turn_seconds, 180 by default) with room for ASR and TTS on top. The library default (30 s) is far
+    # too short for the agent server.
+    RESPONSE_TIMEOUT_SECONDS = 300
 
     # type hints
     socket_client: AmadeoClient
@@ -73,7 +79,8 @@ class ConversationalAiPipelineClient:
         logger.info("pygame initialized for audio playback.")
 
         # Initialize the new AmadeoClient
-        self.socket_client = AmadeoClient( self.args_dict['host'], self.args_dict['port'], additional_server_response_functionality=self.handle_server_response)
+        self.socket_client = AmadeoClient( self.args_dict['host'], self.args_dict['port'], additional_server_response_functionality=self.handle_server_response,
+                                           persistent_request_timeout=self.args_dict['response_timeout_seconds'])
 
     def handle_server_response(self, response, raw_data):
         """
@@ -233,6 +240,29 @@ class ConversationalAiPipelineClient:
             logger.info(f"{ColoredText.GREEN_TEXT}Connection closed. Exiting.{ColoredText.END_TEXT}")
             sys.exit(0)
 
+    def recover_from_failed_request(self) -> bool:
+        """
+        Reconnect after a request that got no reply, so that a late reply can never be mistaken for the reply to a
+        later request. The request is not resent: the server may still be working on it, and running an agent turn
+        twice could repeat a tool call.
+
+        Returns:
+            bool: True to carry on listening, False if the server cannot be reached (the client then stops).
+        """
+        error = getattr(self.socket_client, 'last_error', None)
+        if isinstance(error, (socket.timeout, TimeoutError)):
+            logger.error(f"{ColoredText.RED_TEXT}The server did not answer within {self.socket_client.persistent_request_timeout:g} seconds "
+                         f"(raise 'response_timeout_seconds' if turns legitimately take this long). Reconnecting; the request was not resent.{ColoredText.END_TEXT}")
+        else:
+            logger.error(f"{ColoredText.RED_TEXT}Lost the connection to the server. Reconnecting...{ColoredText.END_TEXT}")
+
+        self.socket_client.close_connection()          # the old socket is dead; this also forgets the old session id
+        if not self.socket_client.establish_persistent_connection():
+            logger.error(f"{ColoredText.RED_TEXT}Could not reconnect to the server. Exiting.{ColoredText.END_TEXT}")
+            return False
+        logger.info(f"{ColoredText.BLUE_TEXT}Reconnected with a new session.{ColoredText.END_TEXT}")
+        return True
+
     def run_client(self):
         """
         The key insight of this algorithm is the three-state machine:
@@ -366,6 +396,7 @@ class ConversationalAiPipelineClient:
 
                                 # Send using the persistent request method with binary audio data
                                 logger.info(f"{ColoredText.BLUE_TEXT}Request sent to server - waiting on return...{ColoredText.END_TEXT}")
+                                response = {}  # stays non-None for a pipeline this client sends nothing for
                                 if self.pipeline == 'reflection':
                                     response, raw_data = self.socket_client.send_persistent_request(
                                         command=self.pipeline, # not really needed but is part of the structure, so - just repeat pipeline.
@@ -395,6 +426,11 @@ class ConversationalAiPipelineClient:
                                         load_previous=self.load_previous
                                     )
                                     # Response is handled automatically by handle_server_response callback
+
+                                # A failed request (usually a timeout) leaves the socket unusable: the server may still
+                                # send the late reply, which would then be read as the reply to the NEXT request.
+                                if response is None and not self.recover_from_failed_request():
+                                    break
 
                                 # Clear the buffer since we've successfully sent this chunk
                                 current_audio_buffer = bytearray()
@@ -555,6 +591,8 @@ class ConversationalAiPipelineClient:
         parser.add_argument("-cs", "--continuous-save", type=bool, default=ConversationalAiPipelineClient.CONTINUOUS_SAVE,help="True if you wish the conversation to be constantly saved so you can pick up the conversation later; False otherwise (basic_conversational pipeline only).")
         parser.add_argument("-lp", "--load-previous", type=bool, default=ConversationalAiPipelineClient.LOAD_PREVIOUS,help="True if you wish to load a previous conversation (if it exists) when you start (i.e. picking up where you previously left off); False otherwise (basic_conversational pipeline only).")
 
+        parser.add_argument("-rt", "--response-timeout-seconds", type=float, default=ConversationalAiPipelineClient.RESPONSE_TIMEOUT_SECONDS, help=f"How long to wait for the server's reply to one spoken request (default: {ConversationalAiPipelineClient.RESPONSE_TIMEOUT_SECONDS}). Must exceed the server's llm_response_timeout_seconds plus ASR and TTS time.")
+
         parser.add_argument("-j", "--json", type=str, default="", help="If this points to a valid JSON file, the ENTIRE parameter settings are pulled from that file, and the defaults - and other arguments passed from the command line - are ignored. If the JSON load fails for whatever reason, though, the defaults WILL be engaged.")
 
         argDict = {}
@@ -586,6 +624,7 @@ class ConversationalAiPipelineClient:
                     argDict['user_id'] = config_dict.get('user_id', ConversationalAiPipelineClient.USER_ID)
                     argDict['continuous_save'] = config_dict.get('continuous_save', ConversationalAiPipelineClient.CONTINUOUS_SAVE)
                     argDict['load_previous'] = config_dict.get('load_previous', ConversationalAiPipelineClient.LOAD_PREVIOUS)
+                    argDict['response_timeout_seconds'] = config_dict.get('response_timeout_seconds', ConversationalAiPipelineClient.RESPONSE_TIMEOUT_SECONDS)
 
                     if argDict['pipeline'] not in VALID_PIPELINES:
                         logger.warning(f"{ColoredText.YELLOW_TEXT}Pipeline {argDict['pipeline']} not in list {VALID_PIPELINES} - setting to {VALID_PIPELINES[0]}.{ColoredText.END_TEXT}")
@@ -616,6 +655,7 @@ class ConversationalAiPipelineClient:
                 argDict['user_id'] = args.user_id
                 argDict['continuous_save'] = args.continuous_save
                 argDict['load_previous'] = args.load_previous
+                argDict['response_timeout_seconds'] = args.response_timeout_seconds
 
                 if argDict['pipeline'] not in VALID_PIPELINES:
                     logger.warning(f"{ColoredText.YELLOW_TEXT}Pipeline {argDict['pipeline']} not in list {VALID_PIPELINES} - setting to {VALID_PIPELINES[0]}.{ColoredText.END_TEXT}")
