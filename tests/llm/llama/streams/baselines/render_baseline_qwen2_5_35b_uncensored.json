@@ -1,0 +1,22 @@
+{
+  "chat_handler_installed": true,
+  "ctx": 2048,
+  "fallback_reason": null,
+  "gpu_layers": 0,
+  "model": "Qwen2.5-35B-Uncensored.gguf",
+  "model_path": "Qwen2.5-35B-Uncensored.gguf",
+  "thinking_off": {
+    "architecture": "qwen2",
+    "rendered_prompt": "<|im_start|>system\nYou are Ada, a guide. Be concise.<|im_end|>\n<|im_start|>user\nWhat is the boiling point of water?<|im_end|>\n<|im_start|>assistant\n100 degrees Celsius at sea level.<|im_end|>\n<|im_start|>user\nAnd at altitude?<|im_end|>\n<|im_start|>assistant\n",
+    "stop_tokens": [],
+    "supports_thinking": false,
+    "thinking_enabled": false,
+    "token_counts": {
+      "assistant:100 degrees Celsius at sea lev": 11,
+      "system:You are Ada, a guide. Be conci": 15,
+      "user:And at altitude?": 12,
+      "user:What is the boiling point of w": 16
+    }
+  },
+  "thinking_on": "<model does not support thinking>"
+}

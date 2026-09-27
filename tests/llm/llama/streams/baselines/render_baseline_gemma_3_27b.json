@@ -1,0 +1,22 @@
+{
+  "chat_handler_installed": true,
+  "ctx": 2048,
+  "fallback_reason": null,
+  "gpu_layers": 0,
+  "model": "gemma-3-27b.gguf",
+  "model_path": "gemma-3-27b.gguf",
+  "thinking_off": {
+    "architecture": "gemma3",
+    "rendered_prompt": "<bos><start_of_turn>user\nYou are Ada, a guide. Be concise.\n\nWhat is the boiling point of water?<end_of_turn>\n<start_of_turn>model\n100 degrees Celsius at sea level.<end_of_turn>\n<start_of_turn>user\nAnd at altitude?<end_of_turn>\n<start_of_turn>model\n",
+    "stop_tokens": [],
+    "supports_thinking": false,
+    "thinking_enabled": false,
+    "token_counts": {
+      "assistant:100 degrees Celsius at sea lev": 14,
+      "system:You are Ada, a guide. Be conci": 12,
+      "user:And at altitude?": 9,
+      "user:What is the boiling point of w": 13
+    }
+  },
+  "thinking_on": "<model does not support thinking>"
+}

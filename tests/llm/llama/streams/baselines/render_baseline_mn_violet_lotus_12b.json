@@ -1,0 +1,22 @@
+{
+  "chat_handler_installed": true,
+  "ctx": 2048,
+  "fallback_reason": null,
+  "gpu_layers": 0,
+  "model": "MN-Violet-Lotus-12B.gguf",
+  "model_path": "MN-Violet-Lotus-12B.gguf",
+  "thinking_off": {
+    "architecture": "llama",
+    "rendered_prompt": "<s>[INST]What is the boiling point of water?[/INST]100 degrees Celsius at sea level.</s>[INST]You are Ada, a guide. Be concise.\n\nAnd at altitude?[/INST]",
+    "stop_tokens": [],
+    "supports_thinking": false,
+    "thinking_enabled": false,
+    "token_counts": {
+      "assistant:100 degrees Celsius at sea lev": 8,
+      "system:You are Ada, a guide. Be conci": 9,
+      "user:And at altitude?": 8,
+      "user:What is the boiling point of w": 12
+    }
+  },
+  "thinking_on": "<model does not support thinking>"
+}

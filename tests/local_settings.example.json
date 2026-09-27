@@ -1,0 +1,9 @@
+{
+    "_comment": "Copy to tests/local_settings.json (gitignored) and fill in for this machine. Tests that need a setting you leave out fail and name it. Paths may use ~ and $VARS.",
+    "model_dir": "/path/to/models/llama.cpp",
+    "embedding_model": "/path/to/models/llama.cpp/embedding_models/nomic-embed-text-v1.5.Q5_K_M.gguf",
+    "llama_python": "~/miniforge3/envs/llama/bin/python",
+    "agent_tools_python": "~/miniforge3/envs/agent-tools/bin/python",
+    "bash_python": "~/miniforge3/envs/bash/bin/python",
+    "ai_tools_config_dir": "/path/to/configs/ai-tools"
+}

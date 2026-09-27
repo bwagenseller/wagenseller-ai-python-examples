@@ -1,0 +1,22 @@
+{
+  "chat_handler_installed": true,
+  "ctx": 2048,
+  "fallback_reason": null,
+  "gpu_layers": 0,
+  "model": "Strawberrylemonade-70B-v1.2.gguf",
+  "model_path": "Strawberrylemonade-70B-v1.2.gguf",
+  "thinking_off": {
+    "architecture": "llama",
+    "rendered_prompt": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\nYou are Ada, a guide. Be concise.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nWhat is the boiling point of water?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n100 degrees Celsius at sea level.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nAnd at altitude?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+    "stop_tokens": [],
+    "supports_thinking": false,
+    "thinking_enabled": false,
+    "token_counts": {
+      "assistant:100 degrees Celsius at sea lev": 12,
+      "system:You are Ada, a guide. Be conci": 36,
+      "user:And at altitude?": 9,
+      "user:What is the boiling point of w": 13
+    }
+  },
+  "thinking_on": "<model does not support thinking>"
+}

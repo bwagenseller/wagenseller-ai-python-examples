@@ -1,0 +1,40 @@
+{
+  "chat_handler_installed": true,
+  "ctx": 2048,
+  "fallback_reason": null,
+  "gpu_layers": 0,
+  "model": "Qwen3.6-35B-A3B-Aggressive-Q4.gguf",
+  "model_path": "Qwen3.6-35B-A3B-Aggressive-Q4.gguf",
+  "thinking_off": {
+    "architecture": "qwen35moe",
+    "rendered_prompt": "<|im_start|>system\nYou are Ada, a guide. Be concise.<|im_end|>\n<|im_start|>user\nWhat is the boiling point of water?<|im_end|>\n<|im_start|>assistant\n100 degrees Celsius at sea level.<|im_end|>\n<|im_start|>user\nAnd at altitude?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    "stop_tokens": [
+      "<|im_end|>",
+      "<|endoftext|>"
+    ],
+    "supports_thinking": true,
+    "thinking_enabled": false,
+    "token_counts": {
+      "assistant:100 degrees Celsius at sea lev": 18,
+      "system:You are Ada, a guide. Be conci": 19,
+      "user:And at altitude?": 5,
+      "user:What is the boiling point of w": 9
+    }
+  },
+  "thinking_on": {
+    "architecture": "qwen35moe",
+    "rendered_prompt": "<|im_start|>system\nYou are Ada, a guide. Be concise.<|im_end|>\n<|im_start|>user\nWhat is the boiling point of water?<|im_end|>\n<|im_start|>assistant\n100 degrees Celsius at sea level.<|im_end|>\n<|im_start|>user\nAnd at altitude?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+    "stop_tokens": [
+      "<|im_end|>",
+      "<|endoftext|>"
+    ],
+    "supports_thinking": true,
+    "thinking_enabled": true,
+    "token_counts": {
+      "assistant:100 degrees Celsius at sea lev": 18,
+      "system:You are Ada, a guide. Be conci": 19,
+      "user:And at altitude?": 5,
+      "user:What is the boiling point of w": 9
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "chat_handler_installed": true,
+  "ctx": 2048,
+  "fallback_reason": null,
+  "gpu_layers": 0,
+  "model": "gemma-4-31B-it-abliterated.gguf",
+  "model_path": "gemma-4-31B-it-abliterated.gguf",
+  "thinking_off": {
+    "architecture": "gemma4",
+    "rendered_prompt": "<bos><|turn>system\nYou are Ada, a guide. Be concise.<turn|>\n<|turn>user\nWhat is the boiling point of water?<turn|>\n<|turn>model\n100 degrees Celsius at sea level.<turn|>\n<|turn>user\nAnd at altitude?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+    "stop_tokens": [
+      "<turn|>",
+      "<|turn>"
+    ],
+    "supports_thinking": true,
+    "thinking_enabled": false,
+    "token_counts": {
+      "assistant:100 degrees Celsius at sea lev": 14,
+      "system:You are Ada, a guide. Be conci": 16,
+      "user:And at altitude?": 9,
+      "user:What is the boiling point of w": 13
+    }
+  },
+  "thinking_on": {
+    "architecture": "gemma4",
+    "rendered_prompt": "<bos><|turn>system\n<|think|>You are Ada, a guide. Be concise.<turn|>\n<|turn>user\nWhat is the boiling point of water?<turn|>\n<|turn>model\n100 degrees Celsius at sea level.<turn|>\n<|turn>user\nAnd at altitude?<turn|>\n<|turn>model\n",
+    "stop_tokens": [
+      "<turn|>",
+      "<|turn>"
+    ],
+    "supports_thinking": true,
+    "thinking_enabled": true,
+    "token_counts": {
+      "assistant:100 degrees Celsius at sea lev": 14,
+      "system:You are Ada, a guide. Be conci": 16,
+      "user:And at altitude?": 9,
+      "user:What is the boiling point of w": 13
+    }
+  }
+}

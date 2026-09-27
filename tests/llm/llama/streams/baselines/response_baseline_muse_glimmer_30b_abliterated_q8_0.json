@@ -1,0 +1,1690 @@
+{
+  "KnowledgeBaseStream": {
+    "help": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "\u001b[1;34m* Type '!history' to see the chat history that WOULD have been sent to the LLM; note it does not and is just for you to review it.\u001b[0m\n\u001b[1;34m* Type '!remember' followed by your prompt to get the LLM to really dig deep in its memory; what this really means is the 'long term' chat history of the vector database will have ample amount of room to try to find the answer from previous conversations. This is useful if you are asking for information that is well outside of the context history window. Note that if the entire chat history fits within the context, the database will not be used (as there is no need, its all there).\u001b[0m\n\u001b[1;34m* Type '!reason' followed by your prompt to let the model reason before it answers, for that one turn - useful for a question that needs several knowledge base entries combined. Only the answer is returned; the deliberation is discarded, and never saved to the chat history. Expect a slower reply, and other sessions wait while it generates. Not to be confused with '!remember', which searches the knowledge base more widely but does not change how the model answers; the two can be combined. Spoken sessions never reason.\u001b[0m\n\u001b[1;34m* Type '!vectortest' followed by your prompt tests the vector database; it will show you everything that would have been selected from the vector database. This does not contact the LLM.\u001b[0m\n\u001b[1;34m* Sometimes, you want to send instructions for this round of chat to the LLM, bout you dont want the instructions saved to the vector database _or_ the chat history; in those cases, wrap instructions in the '##' delimiter like so: 'Tell me about Artificial intelligence## , but please use no more than 50 characters##.' This way the instructions will not be saved (so it wont influence future generations).\u001b[0m\n\u001b[1;34m* ...and, finally, type '!help' for this menu again!\u001b[0m\n",
+        "response": "",
+        "success": true,
+        "type": "system_message"
+      },
+      "session_after": {
+        "chat_history_len": 0,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "history_review": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 0,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "midsize_history_review": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 0 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 0: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 1 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 2 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 2: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 3 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 3: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 3: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 3: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 4 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 4: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 4: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 4: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 5 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 5: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 5: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 5: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 6 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 6: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 6: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 6: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 7 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 16,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "midsize_plain": {
+      "generator_calls": [
+        {
+          "max_tokens": 160,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 7 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 1 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 6 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 6: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 6: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 6: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 0 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 1 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 2 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 3 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 3: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 3: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 3: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 4 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 4: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 4: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 4: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 5 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 5: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 5: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 5: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 6 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 6: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 6: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 6: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 7 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 18,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "no_such_session": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "session_id does_not_exist not found - maybe it recently closed?",
+        "response": "",
+        "success": false,
+        "type": "error"
+      }
+    },
+    "overflow_history_review": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 13 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 13: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 14 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 14: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 14: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 14: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 15 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 15: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 15: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 15: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 16 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 16: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 16: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 16: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 17 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 17: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 18 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 19 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 20 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 20: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 20: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 20: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 21 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 22 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 23 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 48,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "overflow_plain": {
+      "generator_calls": [
+        {
+          "max_tokens": 160,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 9 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 9: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 9: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 9: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 18 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 19 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 13 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 14 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 14: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 14: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 14: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 15 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 15: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 15: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 15: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 16 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 16: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 16: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 16: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 17 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 18 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 19 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 20 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 20: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 20: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 20: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 21 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 22 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 23 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 50,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "overflow_think": {
+      "generator_calls": [
+        {
+          "max_tokens": 160,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 9 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 9: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 9: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 9: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 18 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 19 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 7 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 1 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 17 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 17: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 23 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 10 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 10: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 10: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 10: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 22 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 21 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 13 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 13: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 22 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 21 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 18 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 8 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 8: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 8: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 8: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 8 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 8: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 8: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 8: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 22 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 23 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 50,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "plain": {
+      "generator_calls": [
+        {
+          "max_tokens": 160,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 2,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "reason": {
+      "generator_calls": [
+        {
+          "max_tokens": 1037,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 2,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "think": {
+      "generator_calls": [
+        {
+          "max_tokens": 160,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTallest mountain?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nMount Everest.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTallest mountain?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nMount Everest.",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTallest mountain?",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nMount Everest.",
+              "role": "assistant"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 2,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "vector_test": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": [
+          {
+            "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+            "role": "user"
+          },
+          {
+            "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+            "role": "assistant"
+          },
+          {
+            "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+            "role": "user"
+          },
+          {
+            "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+            "role": "assistant"
+          },
+          {
+            "content": "### Relevant Conversation History - Request:\nWhat boils at 100C?",
+            "role": "user"
+          },
+          {
+            "content": "### Relevant Conversation History - Response:\nWater, at sea level.",
+            "role": "assistant"
+          },
+          {
+            "content": "### Relevant Conversation History - Request:\nTallest mountain?",
+            "role": "user"
+          },
+          {
+            "content": "### Relevant Conversation History - Response:\nMount Everest.",
+            "role": "assistant"
+          },
+          {
+            "content": "### Relevant Conversation History - Request:\nTallest mountain?",
+            "role": "user"
+          },
+          {
+            "content": "### Relevant Conversation History - Response:\nMount Everest.",
+            "role": "assistant"
+          },
+          {
+            "content": "### Relevant Conversation History - Request:\nTallest mountain?",
+            "role": "user"
+          },
+          {
+            "content": "### Relevant Conversation History - Response:\nMount Everest.",
+            "role": "assistant"
+          }
+        ],
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 0,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    }
+  },
+  "RolePlayStream": {
+    "crystal": {
+      "generator_calls": [
+        {
+          "max_tokens": 160,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "*You peer into the crystal ball* <think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 0,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "help": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "\u001b[1;34m* Type '!save' to save the current session.\u001b[0m\n\u001b[1;34m* Type '!load' to reload the last saved session (this will clear current unsaved progress).\u001b[0m\n\u001b[1;34m* Type '!history' to see the chat history that WOULD have been sent to the LLM; note it does not and is just for you to review it.\u001b[0m\n\u001b[1;34m* Type '!strike' to remove the last chat request/response from the chat history and vector database.\u001b[0m\n\u001b[1;34m* Type '!crystal' followed by your prompt to see what the LLM would say to a zany question or comment; the request nor response are saved in the chat history, so after the LLM initially responds, it will be like you never asked the question. Careful, though, it does consume a Morty!\u001b[0m\n\u001b[1;34m* Type '!reason' followed by your prompt to let the model reason out loud for that one turn. Reasoning is normally suppressed, as it costs both time and context to generate text you never see. The deliberation is never saved to the chat history or the vector database. The turn gets extra token room for the deliberation on top of the normal response budget, so there is no need to add a length prefix - and better not to, since those ask the model to fill the whole budget and it will spend it planning.\u001b[0m\n\u001b[1;34m* Type '!remember' followed by your prompt to get the LLM to really dig deep in its memory; what this really means is the 'long term' chat history of the vector database will have ample amount of room to try to find the answer from previous conversations. This is useful if you are asking for information that is well outside of the context history window. Note that if the entire chat history fits within the context, the database will not be used (as there is no need, its all there).\u001b[0m\n\u001b[1;34m* Type '!date' to print the current datetime in a line (something like 'For reference, the datetime is YYYY-MM-DD HH:II:SS); useful for tracking dates.\u001b[0m\n\u001b[1;34m* Type '!vectortest' followed by your prompt tests the vector database; it will show you everything that would have been selected from the vector database. This does not contact the LLM.\u001b[0m\n\u001b[1;34m* Type '!ignoreme' followed by your prompt alters the items found matching in the vector database by ignoring the user input / p[rompt / request via replacing it with a generic 'Update me.'; useful if you want to save on tokens while having the assistant use its previous responses (good for having it remember parts of a roleplay world it created).\u001b[0m\n\u001b[1;34m* Type '!ignoreyou' followed by your prompt alters the items found matching in the vector database by ignoring the assistant response via replacing it with a generic 'Fascinating.'; useful if you want the assistant to focus on what you said and ignore its response (for example, if you use it for journaling). Also useful if the assistant is chatty and fills responses with nonsense filler or questions, and you want it to focus on what you said.\u001b[0m\n\u001b[1;34m* Type '!veryshort', '!short', '!medium', '!normal', '!long', or '!verylong'  followed by your prompt to temporarily set the max-response-tokens. Values: '!veryshort'=32, '!short'=64, '!medium'=128, '!normal'=256, '!long'=512, '!verylong'=1024. Omit these to use the default.\u001b[0m\n\u001b[1;34m* Sometimes, you want to send instructions for this round of chat to the LLM, bout you dont want the instructions saved to the vector database _or_ the chat history; in those cases, wrap instructions in the '##' delimiter like so: 'Tell me about Artificial intelligence## , but please use no more than 50 characters##.' This way the instructions will not be saved (so it wont influence future generations).\u001b[0m\n\u001b[1;34m* ...and, finally, type '!help' for this menu again!\u001b[0m\n",
+        "response": "",
+        "success": true,
+        "type": "system_message"
+      },
+      "session_after": {
+        "chat_history_len": 0,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "history_review": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 0,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "ignore_me": {
+      "generator_calls": [
+        {
+          "max_tokens": 160,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 2,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "length_preset_short": {
+      "generator_calls": [
+        {
+          "max_tokens": 64,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "What boils water?## Use up to 64 tokens in your response; try to fill the entire token count, if it makes sense; do not mention the change in tokens or change in response pattern.##",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 2,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "load": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "I am not sure what just happened.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 0,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "midsize_history_review": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 0 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 0: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 1 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 2 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 2: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 3 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 3: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 3: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 3: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 4 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 4: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 4: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 4: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 5 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 5: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 5: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 5: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 6 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 6: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 6: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 6: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 7 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 16,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "midsize_plain": {
+      "generator_calls": [
+        {
+          "max_tokens": 160,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "Tell me fact number 0 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 1 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 2 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 3 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 3: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 3: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 3: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 4 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 4: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 4: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 4: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 5 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 5: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 5: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 5: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 6 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 6: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 6: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 6: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 7 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 18,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "no_such_session": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "session_id does_not_exist not found - maybe it recently closed?",
+        "response": "",
+        "success": false,
+        "type": "error"
+      }
+    },
+    "overflow_history_review": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 12 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 12: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 12: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 12: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 13 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 13: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 14 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 14: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 14: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 14: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 15 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 15: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 15: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 15: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 16 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 16: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 16: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 16: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 17 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 17: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 18 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 19 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 20 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 20: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 20: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 20: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 21 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 22 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32muser \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m40 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mTell me fact number 23 about water and its boiling point at altitude.\u001b[0m\n\n\u001b[1;33mrole: \u001b[0m\u001b[1;32massistant \u001b[0m\u001b[1;33mtoken count: \u001b[0m\u001b[1;32m80 \u001b[0m\n\u001b[1;33mcontent: \u001b[0m\u001b[1;36mFact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. \u001b[0m\n\n",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 48,
+        "full_history_fits": false,
+        "used_tokens": 0
+      }
+    },
+    "overflow_plain": {
+      "generator_calls": [
+        {
+          "max_tokens": 160,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 9 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 9: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 9: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 9: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 18 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 19 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 12 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 12: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 12: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 12: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 13 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 14 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 14: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 14: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 14: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 15 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 15: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 15: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 15: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 16 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 16: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 16: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 16: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 17 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 18 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 19 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 20 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 20: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 20: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 20: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 21 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 22 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 23 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 50,
+        "full_history_fits": false,
+        "used_tokens": 0
+      }
+    },
+    "overflow_think": {
+      "generator_calls": [
+        {
+          "max_tokens": 160,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 9 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 9: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 9: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 9: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 18 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 19 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 19: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 7 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 7: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 1 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 17 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 17: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 17: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 23 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 10 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 10: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 10: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 10: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 22 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 21 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 13 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 13: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 13: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 22 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 21 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 21: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 18 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 18: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 8 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 8: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 8: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 8: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "### Relevant Conversation History - Request:\nTell me fact number 8 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "### Relevant Conversation History - Response:\nFact 8: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 8: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 8: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 22 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 22: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "Tell me fact number 23 about water and its boiling point at altitude.",
+              "role": "user"
+            },
+            {
+              "content": "Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 23: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+              "role": "assistant"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 50,
+        "full_history_fits": false,
+        "used_tokens": 0
+      }
+    },
+    "plain": {
+      "generator_calls": [
+        {
+          "max_tokens": 160,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 2,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "reason": {
+      "generator_calls": [
+        {
+          "max_tokens": 1037,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 2,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "save": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "That is burned into my memory.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 0,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "strike": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "I forgot what you just said.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 0,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "think": {
+      "generator_calls": [
+        {
+          "max_tokens": 160,
+          "messages": [
+            {
+              "content": "You are Ada, a guide. Be concise.",
+              "role": "system"
+            },
+            {
+              "content": "What boils water?",
+              "role": "user"
+            }
+          ],
+          "repeat_penalty": 1.1,
+          "stop": [
+            "[INST]",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|eot|>",
+            "<|return|>"
+          ],
+          "stream": false
+        }
+      ],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": "<think>weighing it up</think>Water boils at 100 degrees Celsius.",
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 2,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    },
+    "vector_test": {
+      "generator_calls": [],
+      "response": {
+        "elapsed_time": 0.0,
+        "file_size": 0,
+        "message": "",
+        "response": [],
+        "success": true,
+        "type": "llm_response"
+      },
+      "session_after": {
+        "chat_history_len": 0,
+        "full_history_fits": true,
+        "used_tokens": 0
+      }
+    }
+  },
+  "ctx": 2048,
+  "model": "Muse-Glimmer-30B-Abliterated-Q8_0.gguf",
+  "model_path": "Muse-Glimmer-30B-Abliterated-Q8_0.gguf",
+  "model_type": "muse-glimmer"
+}

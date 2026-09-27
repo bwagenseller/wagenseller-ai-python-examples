@@ -1,0 +1,61 @@
+{
+  "files_written": [
+    "chat_history.json",
+    "vector_db.parquet"
+  ],
+  "model": "MN-Violet-Lotus-12B.gguf",
+  "not_reloaded": {
+    "chat_history": [],
+    "db_rows": 4,
+    "db_user_text": [
+      "Artificial intelligence (AI) is a field of computer science that aims to create intelligent machines capable of reasoning, learning, and problem-solving.",
+      "Mount Everest is the Earth's highest mountain above sea level, located in the Himalayas.",
+      "The moon is Earth's only natural satellite. It influences tides and stabilizes Earth's axial tilt.",
+      "Water boils at 100 degrees Celsius (212 degrees Fahrenheit) at standard atmospheric pressure (sea level). This temperature changes with altitude."
+    ]
+  },
+  "reloaded": {
+    "chat_history": [
+      {
+        "content": "Tell me fact number 0 about water and its boiling point at altitude.",
+        "role": "user",
+        "token_count": 40
+      },
+      {
+        "content": "Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 0: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+        "role": "assistant",
+        "token_count": 80
+      },
+      {
+        "content": "Tell me fact number 1 about water and its boiling point at altitude.",
+        "role": "user",
+        "token_count": 40
+      },
+      {
+        "content": "Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 1: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+        "role": "assistant",
+        "token_count": 80
+      },
+      {
+        "content": "Tell me fact number 2 about water and its boiling point at altitude.",
+        "role": "user",
+        "token_count": 40
+      },
+      {
+        "content": "Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. Fact 2: water boils at a lower temperature the higher you go, because the air pressure drops. ",
+        "role": "assistant",
+        "token_count": 80
+      }
+    ],
+    "db_rows": 7,
+    "db_user_text": [
+      "Artificial intelligence (AI) is a field of computer science that aims to create intelligent machines capable of reasoning, learning, and problem-solving.",
+      "Mount Everest is the Earth's highest mountain above sea level, located in the Himalayas.",
+      "Tell me fact number 0 about water and its boiling point at altitude.",
+      "Tell me fact number 1 about water and its boiling point at altitude.",
+      "Tell me fact number 2 about water and its boiling point at altitude.",
+      "The moon is Earth's only natural satellite. It influences tides and stabilizes Earth's axial tilt.",
+      "Water boils at 100 degrees Celsius (212 degrees Fahrenheit) at standard atmospheric pressure (sea level). This temperature changes with altitude."
+    ]
+  }
+}

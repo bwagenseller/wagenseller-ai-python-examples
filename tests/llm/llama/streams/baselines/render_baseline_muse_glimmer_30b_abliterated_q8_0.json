@@ -1,0 +1,40 @@
+{
+  "chat_handler_installed": true,
+  "ctx": 2048,
+  "fallback_reason": null,
+  "gpu_layers": 0,
+  "model": "Muse-Glimmer-30B-Abliterated-Q8_0.gguf",
+  "model_path": "Muse-Glimmer-30B-Abliterated-Q8_0.gguf",
+  "thinking_off": {
+    "architecture": "muse-glimmer",
+    "rendered_prompt": "<|begin_of_text|><|start|>system<|message|>You are Ada, a guide. Be concise.\n\nReasoning strength: low.\n\n# Valid recipients: \"self\", \"user\".<|eot|><|start|>user<|message|>What is the boiling point of water?<|eot|><|start|>assistant to=user<|message|>100 degrees Celsius at sea level.<|eot|><|start|>user<|message|>And at altitude?<|eot|><|start|>assistant",
+    "stop_tokens": [
+      "<|eot|>",
+      "<|return|>"
+    ],
+    "supports_thinking": true,
+    "thinking_enabled": false,
+    "token_counts": {
+      "assistant:100 degrees Celsius at sea lev": 13,
+      "system:You are Ada, a guide. Be conci": 31,
+      "user:And at altitude?": 8,
+      "user:What is the boiling point of w": 12
+    }
+  },
+  "thinking_on": {
+    "architecture": "muse-glimmer",
+    "rendered_prompt": "<|begin_of_text|><|start|>system<|message|>You are Ada, a guide. Be concise.\n\nReasoning strength: high.\n\n# Valid recipients: \"self\", \"user\".<|eot|><|start|>user<|message|>What is the boiling point of water?<|eot|><|start|>assistant to=user<|message|>100 degrees Celsius at sea level.<|eot|><|start|>user<|message|>And at altitude?<|eot|><|start|>assistant",
+    "stop_tokens": [
+      "<|eot|>",
+      "<|return|>"
+    ],
+    "supports_thinking": true,
+    "thinking_enabled": true,
+    "token_counts": {
+      "assistant:100 degrees Celsius at sea lev": 13,
+      "system:You are Ada, a guide. Be conci": 31,
+      "user:And at altitude?": 8,
+      "user:What is the boiling point of w": 12
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "chat_handler_installed": false,
+  "ctx": 2048,
+  "fallback_reason": "The GGUF at [<model_dir>/Midnight-Rose.gguf] has no embedded chat template ('tokenizer.chat_template'), so its prompt format cannot be determined. Pass an explicit 'chat_format' to Llama() for this model.",
+  "gpu_layers": 0,
+  "model": "Midnight-Rose.gguf",
+  "model_path": "Midnight-Rose.gguf",
+  "thinking_off": {
+    "architecture": "llama",
+    "rendered_prompt": "<RAISED ValueError: The GGUF at [<model_dir>/Midnight-Rose.gguf] has no embedded chat template ('tokenizer.chat_template'), so its prompt format cannot be determined. Pass an explicit 'chat_format' to Llama() for this model.>",
+    "stop_tokens": [],
+    "supports_thinking": false,
+    "thinking_enabled": false,
+    "token_counts": {
+      "assistant:100 degrees Celsius at sea lev": "<RAISED ValueError: The GGUF at [<model_dir>/Midnight-Rose.gguf] has no embedded chat template ('tokenizer.chat_template'), so its prompt format cannot be determined. Pass an explicit 'chat_format' to Llama() for this model.>",
+      "system:You are Ada, a guide. Be conci": "<RAISED ValueError: The GGUF at [<model_dir>/Midnight-Rose.gguf] has no embedded chat template ('tokenizer.chat_template'), so its prompt format cannot be determined. Pass an explicit 'chat_format' to Llama() for this model.>",
+      "user:And at altitude?": "<RAISED ValueError: The GGUF at [<model_dir>/Midnight-Rose.gguf] has no embedded chat template ('tokenizer.chat_template'), so its prompt format cannot be determined. Pass an explicit 'chat_format' to Llama() for this model.>",
+      "user:What is the boiling point of w": "<RAISED ValueError: The GGUF at [<model_dir>/Midnight-Rose.gguf] has no embedded chat template ('tokenizer.chat_template'), so its prompt format cannot be determined. Pass an explicit 'chat_format' to Llama() for this model.>"
+    }
+  },
+  "thinking_on": "<model does not support thinking>"
+}

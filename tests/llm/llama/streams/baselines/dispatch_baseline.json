@@ -1,0 +1,490 @@
+{
+  "KnowledgeBaseStream": {
+    "dispatch": {
+      "create_new_defaults": {
+        "calls": [
+          {
+            "args": [
+              "s2",
+              "UNKNOWN",
+              true
+            ],
+            "kwargs": {},
+            "method": "create_session"
+          }
+        ],
+        "response": {
+          "elapsed_time": 0.0,
+          "file_size": 0,
+          "message": "<FROM-argsDict>",
+          "response": "",
+          "success": true,
+          "type": "system_message"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s2"
+        ]
+      },
+      "create_new_full": {
+        "calls": [
+          {
+            "args": [
+              "s1",
+              "u1",
+              false
+            ],
+            "kwargs": {},
+            "method": "create_session"
+          }
+        ],
+        "response": {
+          "elapsed_time": 0.0,
+          "file_size": 0,
+          "message": "<FROM-argsDict>",
+          "response": "",
+          "success": true,
+          "type": "system_message"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s1"
+        ]
+      },
+      "create_no_user_request": {
+        "calls": [
+          {
+            "args": [
+              "s9",
+              "UNKNOWN",
+              true
+            ],
+            "kwargs": {},
+            "method": "create_session"
+          }
+        ],
+        "response": {
+          "elapsed_time": 0.0,
+          "file_size": 0,
+          "message": "<FROM-argsDict>",
+          "response": "",
+          "success": true,
+          "type": "system_message"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s9"
+        ]
+      },
+      "create_when_exists": {
+        "calls": [
+          {
+            "method": "get_response",
+            "request": {
+              "command": "create_llm_session",
+              "sessionID": "s3",
+              "user_request": "hello"
+            }
+          }
+        ],
+        "response": {
+          "stubbed": "get_response"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s3"
+        ]
+      },
+      "missing_command": {
+        "calls": [
+          {
+            "method": "get_response",
+            "request": {
+              "sessionID": "s8",
+              "user_request": "hello"
+            }
+          }
+        ],
+        "response": {
+          "stubbed": "get_response"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s8"
+        ]
+      },
+      "no_session_id": {
+        "calls": [
+          {
+            "method": "get_response",
+            "request": {
+              "command": "request",
+              "user_request": "hello"
+            }
+          }
+        ],
+        "response": {
+          "stubbed": "get_response"
+        },
+        "second_value": null,
+        "sessions_after": []
+      },
+      "none_session_id": {
+        "calls": [
+          {
+            "method": "get_response",
+            "request": {
+              "command": "request",
+              "sessionID": null,
+              "user_request": "hello"
+            }
+          }
+        ],
+        "response": {
+          "stubbed": "get_response"
+        },
+        "second_value": null,
+        "sessions_after": []
+      },
+      "request_empty_text": {
+        "calls": [],
+        "response": {
+          "elapsed_time": 0.0,
+          "file_size": 0,
+          "message": "No user request made.",
+          "response": "",
+          "success": false,
+          "type": "error"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s6"
+        ]
+      },
+      "request_no_text": {
+        "calls": [],
+        "response": {
+          "elapsed_time": 0.0,
+          "file_size": 0,
+          "message": "No user request made.",
+          "response": "",
+          "success": false,
+          "type": "error"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s5"
+        ]
+      },
+      "request_with_text": {
+        "calls": [
+          {
+            "method": "get_response",
+            "request": {
+              "command": "request",
+              "sessionID": "s4",
+              "user_request": "hello"
+            }
+          }
+        ],
+        "response": {
+          "stubbed": "get_response"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s4"
+        ]
+      },
+      "unknown_command": {
+        "calls": [
+          {
+            "method": "get_response",
+            "request": {
+              "command": "banana",
+              "sessionID": "s7",
+              "user_request": "hello"
+            }
+          }
+        ],
+        "response": {
+          "stubbed": "get_response"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s7"
+        ]
+      }
+    },
+    "lifecycle": {
+      "after_remove_get_session": null,
+      "after_remove_locks": [],
+      "after_remove_sessions": [],
+      "double_remove": "no_error",
+      "get_session_and_lock_existing": {
+        "lock_present": true,
+        "session": {
+          "session_id": "live"
+        }
+      },
+      "get_session_and_lock_missing": {
+        "lock_present": false,
+        "session": null
+      },
+      "get_session_existing": {
+        "session_id": "live"
+      },
+      "get_session_missing": null,
+      "remove_unknown": "no_error"
+    }
+  },
+  "RolePlayStream": {
+    "dispatch": {
+      "create_new_defaults": {
+        "calls": [
+          {
+            "args": [
+              "s2",
+              "UNKNOWN",
+              "",
+              "default",
+              true,
+              false,
+              true
+            ],
+            "kwargs": {},
+            "method": "create_session"
+          }
+        ],
+        "response": {
+          "elapsed_time": 0.0,
+          "file_size": 0,
+          "message": "<FROM-create_session-RETURN>",
+          "response": "",
+          "success": true,
+          "type": "system_message"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s2"
+        ]
+      },
+      "create_new_full": {
+        "calls": [
+          {
+            "args": [
+              "s1",
+              "u1",
+              "Ada",
+              "sp1",
+              false,
+              true,
+              false
+            ],
+            "kwargs": {},
+            "method": "create_session"
+          }
+        ],
+        "response": {
+          "elapsed_time": 0.0,
+          "file_size": 0,
+          "message": "<FROM-create_session-RETURN>",
+          "response": "",
+          "success": true,
+          "type": "system_message"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s1"
+        ]
+      },
+      "create_no_user_request": {
+        "calls": [
+          {
+            "args": [
+              "s9",
+              "UNKNOWN",
+              "",
+              "default",
+              true,
+              false,
+              true
+            ],
+            "kwargs": {},
+            "method": "create_session"
+          }
+        ],
+        "response": {
+          "elapsed_time": 0.0,
+          "file_size": 0,
+          "message": "<FROM-create_session-RETURN>",
+          "response": "",
+          "success": true,
+          "type": "system_message"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s9"
+        ]
+      },
+      "create_when_exists": {
+        "calls": [
+          {
+            "method": "get_response",
+            "request": {
+              "command": "create_llm_session",
+              "sessionID": "s3",
+              "user_request": "hello"
+            }
+          }
+        ],
+        "response": {
+          "stubbed": "get_response"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s3"
+        ]
+      },
+      "missing_command": {
+        "calls": [
+          {
+            "method": "get_response",
+            "request": {
+              "sessionID": "s8",
+              "user_request": "hello"
+            }
+          }
+        ],
+        "response": {
+          "stubbed": "get_response"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s8"
+        ]
+      },
+      "no_session_id": {
+        "calls": [
+          {
+            "method": "get_response",
+            "request": {
+              "command": "request",
+              "user_request": "hello"
+            }
+          }
+        ],
+        "response": {
+          "stubbed": "get_response"
+        },
+        "second_value": null,
+        "sessions_after": []
+      },
+      "none_session_id": {
+        "calls": [
+          {
+            "method": "get_response",
+            "request": {
+              "command": "request",
+              "sessionID": null,
+              "user_request": "hello"
+            }
+          }
+        ],
+        "response": {
+          "stubbed": "get_response"
+        },
+        "second_value": null,
+        "sessions_after": []
+      },
+      "request_empty_text": {
+        "calls": [],
+        "response": {
+          "elapsed_time": 0.0,
+          "file_size": 0,
+          "message": "No user request made.",
+          "response": "",
+          "success": false,
+          "type": "error"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s6"
+        ]
+      },
+      "request_no_text": {
+        "calls": [],
+        "response": {
+          "elapsed_time": 0.0,
+          "file_size": 0,
+          "message": "No user request made.",
+          "response": "",
+          "success": false,
+          "type": "error"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s5"
+        ]
+      },
+      "request_with_text": {
+        "calls": [
+          {
+            "method": "get_response",
+            "request": {
+              "command": "request",
+              "sessionID": "s4",
+              "user_request": "hello"
+            }
+          }
+        ],
+        "response": {
+          "stubbed": "get_response"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s4"
+        ]
+      },
+      "unknown_command": {
+        "calls": [
+          {
+            "method": "get_response",
+            "request": {
+              "command": "banana",
+              "sessionID": "s7",
+              "user_request": "hello"
+            }
+          }
+        ],
+        "response": {
+          "stubbed": "get_response"
+        },
+        "second_value": null,
+        "sessions_after": [
+          "s7"
+        ]
+      }
+    },
+    "lifecycle": {
+      "after_remove_get_session": null,
+      "after_remove_locks": [],
+      "after_remove_sessions": [],
+      "double_remove": "no_error",
+      "get_session_and_lock_existing": {
+        "lock_present": true,
+        "session": {
+          "session_id": "live"
+        }
+      },
+      "get_session_and_lock_missing": {
+        "lock_present": false,
+        "session": null
+      },
+      "get_session_existing": {
+        "session_id": "live"
+      },
+      "get_session_missing": null,
+      "remove_unknown": "no_error"
+    }
+  }
+}
