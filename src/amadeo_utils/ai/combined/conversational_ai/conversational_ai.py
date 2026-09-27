@@ -5,9 +5,13 @@ import json
 from amadeo_utils.colored_text import ColoredText
 from typing import Dict, Any
 import threading
+import time
 import os
 import argparse
 from amadeo_utils.server.session_worker import SessionWorker
+from amadeo_utils.ai.combined.conversational_ai.wake_words import select_agent, WAKE_WORD_MAX_POSITION
+from amadeo_utils.ai.combined.conversational_ai.handoff import build_handoff_note, speaker_tag, HANDOFF_MAX_TURNS, HANDOFF_MAX_CHARS, HIDDEN_DELIMITER
+from amadeo_utils.ai.combined.conversational_ai.routing import build_routing_prompt, parse_routing_reply, display_name, ROUTING_MAX_TOKENS
 
 # Configure logging to show timestamps and log levels
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
@@ -41,7 +45,10 @@ class ConversationalAiServer:
         self.session_to_asr_client_map = {}  # Simple dictionary that maps sessionIDs to a tuple (asr clients, asr client locks); asr clients use a persistent connection, so we keep that connection for the whole session
         self.session_to_asr_client_lock = threading.Lock() # use this lock to interact with the asr client as well
 
-        self.session_to_llm_client_map = {}  # Simple dictionary that maps sessionIDs to a tuple (llm clients, llm client locks); llm clients use a persistent connection, so we keep that connection for the whole session
+        # Maps (sessionID, agent name) to a tuple (llm client, llm client lock). Each agent gets its own persistent LLM
+        # connection for the whole session, because the LLM server fixes the system prompt when the session is created -
+        # one shared connection would keep answering as whichever agent spoke first.
+        self.session_to_llm_client_map = {}
         self.session_to_llm_client_lock = threading.Lock() # use this lock to interact with the llm client as well
 
         # Register global handlers for all sessions
@@ -58,7 +65,8 @@ class ConversationalAiServer:
 
         self.server = AmadeoServer(argsDict['host'], argsDict['port'],
                                  synchronous=False,
-                                 additional_client_functionality=self.handle_client_request)
+                                 additional_client_functionality=self.handle_client_request,
+                                 additional_shutdown=self.end_session)
 
 
     def handle_client_request(self, request, client_binary_data):
@@ -110,21 +118,42 @@ class ConversationalAiServer:
             }
             worker.add_work(job)
         elif pipeline == 'basic_conversational':
-            # Store user metadata for LLM first_request
-            voice = request.get('voice')
-            user_id = request.get('user_id')
-            system_prompt_id = request.get('system_prompt_id', 'default')
-            player_name = request.get('player_name', '')
-            continuous_save = request.get('continuous_save', False)
-            load_previous = request.get('load_previous', True)
+            # Settings that belong to the user, whichever agent answers
+            worker.save_in_backpack('user_id', request.get('user_id'))
+            worker.save_in_backpack('player_name', request.get('player_name', ''))
+            # Who is talking this turn, for the speaker tag and handoff notes (see handoff.py). The client sends its
+            # player_name for now; voice recognition will fill this in later. An older client sends nothing, and
+            # player_name stands in.
+            worker.save_in_backpack('speaker', request.get('speaker') or request.get('player_name') or '')
 
+            # Every agent the client knows about. The ASR stage picks one of them (or none) once it has the
+            # transcript, and cuts this list down to that one agent before the LLM stage.
+            agents = request.get('agents')
+            if not isinstance(agents, list) or not agents:
+                # A client from before wake words: one always-listening agent built from the top-level keys
+                agents = [{
+                    'name': 'default',
+                    'wake_words': [],
+                    'system_prompt_id': request.get('system_prompt_id', 'default'),
+                    'voice': request.get('voice'),
+                    'continuous_save': request.get('continuous_save', False),
+                    'load_previous': request.get('load_previous', True)
+                }]
+            worker.save_in_backpack('agents', agents)
 
-            worker.save_in_backpack('voice', voice)
-            worker.save_in_backpack('user_id', user_id)
-            worker.save_in_backpack('system_prompt_id', system_prompt_id)
-            worker.save_in_backpack('player_name', player_name)
-            worker.save_in_backpack('continuous_save', continuous_save)
-            worker.save_in_backpack('load_previous', load_previous)
+            # Is this the next turn of a conversation that is already under way, and with whom?
+            worker.save_in_backpack('continuation', bool(request.get('continuation', False)))
+            worker.save_in_backpack('active_agent', request.get('active_agent', ''))
+            worker.save_in_backpack('wake_word_max_position', request.get('wake_word_max_position', WAKE_WORD_MAX_POSITION))
+
+            # The turns of the conversation so far (oldest first), so an agent can be told what was said to the others
+            # since it last spoke (see handoff.py)
+            worker.save_in_backpack('recent_turns', request.get('recent_turns') or [])
+            worker.save_in_backpack('handoff_max_turns', request.get('handoff_max_turns', HANDOFF_MAX_TURNS))
+            worker.save_in_backpack('handoff_max_chars', request.get('handoff_max_chars', HANDOFF_MAX_CHARS))
+
+            # May the LLM be asked which agent was addressed, when several are in play and the rules can't tell?
+            worker.save_in_backpack('llm_routing', bool(request.get('llm_routing', True)))
 
             job = {
                 'command': 'asr-send',
@@ -176,15 +205,26 @@ class ConversationalAiServer:
             return self.session_workers[request_id]
 
 
-    def _get_or_create_llm_client(self, session_id:str, request_id:str, user_id:str, player_name:str, system_prompt_id:str, continuous_save:bool = False, load_previous:bool = False):
+    def _get_or_create_llm_client(self, session_id:str, request_id:str, agent_name:str, user_id:str, player_name:str, system_prompt_id:str, continuous_save:bool = False, load_previous:bool = False):
+        """
+        Finds the llm client for this session and agent, creating it (and its LLM session) on first use.
 
+        Args:
+            session_id: this server's session ID for the client.
+            request_id: the request that needs the LLM.
+            agent_name: the agent answering; each agent in a session has its own LLM connection and chat history.
+            user_id, player_name, system_prompt_id, continuous_save, load_previous: sent to the LLM server when the
+                session is created (only then - they are fixed for the life of the LLM session).
+
+        Returns:
+            (llm client, its lock)
         """
-        Finds the llm_client by session ID and returns both the llm client and its lock in a tuple
-        """
+        key = (session_id, agent_name)
         with self.session_to_llm_client_lock:
-            if session_id not in self.session_to_llm_client_map:
-                logger.info(f"{ColoredText.BLUE_TEXT}Creating a LLM client for sessionID {session_id} to LLM host {self.llm_host} and LLM port {self.llm_port}.{ColoredText.END_TEXT}")
-                llm_client = AmadeoClient( self.llm_host, self.llm_port, additional_server_response_functionality=self.handle_llm_server_response, session_id = session_id, request_id = request_id, persistent_request_timeout=self.llm_response_timeout)
+            if key not in self.session_to_llm_client_map:
+                logger.info(f"{ColoredText.BLUE_TEXT}Creating a LLM client for sessionID {session_id}, agent '{agent_name}', to LLM host {self.llm_host} and LLM port {self.llm_port}.{ColoredText.END_TEXT}")
+                # The LLM server refuses a sessionID that is already in use, so each agent asks for its own
+                llm_client = AmadeoClient( self.llm_host, self.llm_port, additional_server_response_functionality=self.handle_llm_server_response, session_id = f"{session_id}-{agent_name}", request_id = request_id, persistent_request_timeout=self.llm_response_timeout)
 
 
                 llm_client_lock = threading.Lock() # use this lock to interact with the asr client as well
@@ -207,8 +247,8 @@ class ConversationalAiServer:
                         load_previous=load_previous
                     )
 
-                self.session_to_llm_client_map[session_id] = (llm_client, llm_client_lock)
-            llm_client, llm_client_lock = self.session_to_llm_client_map[session_id]
+                self.session_to_llm_client_map[key] = (llm_client, llm_client_lock)
+            llm_client, llm_client_lock = self.session_to_llm_client_map[key]
             return llm_client, llm_client_lock
 
 
@@ -240,13 +280,82 @@ class ConversationalAiServer:
             self.session_workers.pop(session_id, None)
 
     def remove_asr_client(self, session_id):
-        """Called by SessionWorker during cleanup"""
-        with self.workers_lock:
+        """
+        Closes and forgets the ASR client for a session.
 
-            asr_client = self.session_to_asr_client_map.pop(session_id, None)
-            if asr_client:
-                asr_client.close_connection()
-                logger.info(f"{ColoredText.BLUE_TEXT}Shut down and removed ASR client for session {session_id}.{ColoredText.END_TEXT}")
+        Args:
+            session_id: the session whose ASR connection is no longer needed.
+        """
+        with self.session_to_asr_client_lock:
+            entry = self.session_to_asr_client_map.pop(session_id, None)
+        if entry:
+            asr_client, _ = entry       # the map holds (client, lock)
+            asr_client.close_connection()
+            logger.info(f"{ColoredText.BLUE_TEXT}Shut down and removed ASR client for session {session_id}.{ColoredText.END_TEXT}")
+
+    def remove_llm_clients(self, session_id):
+        """
+        Closes and forgets every LLM client for a session (one per agent that was spoken to).
+
+        Args:
+            session_id: the session whose LLM connections are no longer needed.
+        """
+        with self.session_to_llm_client_lock:
+            keys = [key for key in self.session_to_llm_client_map if key[0] == session_id]
+            entries = [(key[1], self.session_to_llm_client_map.pop(key)) for key in keys]
+        for agent_name, (llm_client, _) in entries:
+            llm_client.close_connection()
+            logger.info(f"{ColoredText.BLUE_TEXT}Shut down and removed LLM client for session {session_id}, agent '{agent_name}'.{ColoredText.END_TEXT}")
+
+    def _route_with_llm(self, session_id, request_id, transcript, candidates, last_speaker):
+        """
+        Asks the LLM which of several agents the user is speaking to.
+
+        Uses the LLM server's stateless 'one_shot' command over a transient connection: nothing is stored in any
+        agent's history, and it needs no LLM session of its own. It runs in this request's worker thread, so the
+        request simply waits for it; it queues behind any generation already on the GPU.
+
+        Args:
+            session_id, request_id: for logging.
+            transcript: what the user said.
+            candidates: the agents in play (see wake_words.select_agent()).
+            last_speaker: the agent that answered the previous turn, or None.
+
+        Returns:
+            The chosen agent, or None if the LLM could not be reached or its answer did not name exactly one candidate.
+        """
+        system_prompt, user_request = build_routing_prompt(transcript, candidates, last_speaker)
+        started = time.time()
+        router = AmadeoClient(self.llm_host, self.llm_port)
+        response, _ = router.send_transient_request('one_shot', 'Which agent was addressed?', system_prompt=system_prompt,
+                                                    user_request=user_request, max_tokens=ROUTING_MAX_TOKENS)
+        elapsed = time.time() - started
+        names = [display_name(a) for a in candidates]
+
+        if not response or not response.get('success'):
+            message = response.get('message', '') if response else 'no reply'
+            logger.warning(f"{ColoredText.YELLOW_TEXT}Worker for sessionID {session_id} amd requestID {request_id}: could not ask the LLM which of {names} was addressed ({message}); the first agent named answers.{ColoredText.END_TEXT}")
+            return None
+
+        reply = response.get('response', '')
+        chosen = parse_routing_reply(reply, candidates)
+        if chosen is None:
+            logger.warning(f"{ColoredText.YELLOW_TEXT}Worker for sessionID {session_id} amd requestID {request_id}: the LLM's answer {reply!r} does not name exactly one of {names}; the first agent named answers.{ColoredText.END_TEXT}")
+        else:
+            logger.info(f"{ColoredText.BLUE_TEXT}Worker for sessionID {session_id} amd requestID {request_id}: the LLM chose '{chosen['name']}' from {names} in {elapsed:.2f} s (answer {reply!r}).{ColoredText.END_TEXT}")
+        return chosen
+
+    def end_session(self, session_id):
+        """
+        AmadeoServer's shutdown hook: runs when a client's session ends - by 'terminate_session', or by the client
+        disconnecting, vanishing or timing out. Closes the session's ASR and LLM connections, which otherwise stayed
+        open for the life of the server. Safe to run twice.
+
+        Args:
+            session_id: the session that ended.
+        """
+        self.remove_asr_client(session_id)
+        self.remove_llm_clients(session_id)
 
     def _handle_tts_interaction(self, worker, job):
         """
@@ -318,6 +427,7 @@ class ConversationalAiServer:
             'sessionID': session_id,
             'requestID': request_id,
             'user_request': transcription,
+            'agent_name': agent_name,
             'user_id': user_id,
             'system_prompt_id': system_prompt_id,
             'player_name': player_name
@@ -325,7 +435,7 @@ class ConversationalAiServer:
         """
         session_id = job['sessionID']
         request_id = job['requestID']
-        llm_client, llm_client_lock = self._get_or_create_llm_client(session_id, request_id, job.get('user_id', 'Bob'), job.get('player_name', ''), job.get('system_prompt_id', 'default'), job.get('continuous_save', False), job.get('load_previous', False))
+        llm_client, llm_client_lock = self._get_or_create_llm_client(session_id, request_id, job.get('agent_name', 'default'), job.get('user_id', 'Bob'), job.get('player_name', ''), job.get('system_prompt_id', 'default'), job.get('continuous_save', False), job.get('load_previous', False))
         with llm_client_lock:
             # we re-use self.session_to_llm_client_lock for the llm_client too
 
@@ -373,10 +483,12 @@ class ConversationalAiServer:
     def handle_llm_server_response(self, response, raw_data):
         """Callback for LLM responses"""
         if response:
-            session_id = response['sessionID']
             request_id = response['requestID']
 
             worker = self._get_worker(request_id)
+            # The LLM session is '<sessionID>-<agent>' (one per agent), so take this server's own sessionID from the
+            # backpack rather than from the LLM's reply
+            session_id = worker.get_from_backpack('sessionID')
 
             job = {
                 'command': 'llm-receive',
@@ -427,12 +539,13 @@ class ConversationalAiServer:
         pipeline = worker.get_pipeline()
 
         logger.info(f"{ColoredText.BLUE_TEXT}Worker for sessionID {session_id} amd requestID {request_id} processing ASR request for pipeline {pipeline}.{ColoredText.END_TEXT}")
+        heard = ''  # exactly what the ASR heard; blank if it heard nothing or failed (the wake-word check needs to know)
         if response.get("success"):
             if response.get('type') == 'transcription':
                 transcription = response.get("transcription")
                 if transcription and transcription.strip():
                     # if the transcription is not blank or None, just pass
-                    pass
+                    heard = transcription
                 else:
                     logger.info(f"{ColoredText.BLUE_TEXT} TEXT IS BLANK for sessionID {session_id} amd requestID {request_id} for pipeline {pipeline}.{ColoredText.END_TEXT}")
                     transcription = "I didn't quite get that."
@@ -483,6 +596,72 @@ class ConversationalAiServer:
             }
             worker.add_work(job)
         elif pipeline == 'basic_conversational':
+            # Was this speech meant for one of the agents? The ASR has already run, so deciding costs nothing extra.
+            selection = select_agent(heard, worker.get_from_backpack('agents'),
+                                     continuation=worker.get_from_backpack('continuation'),
+                                     active_agent=worker.get_from_backpack('active_agent'),
+                                     max_position=worker.get_from_backpack('wake_word_max_position'))
+            agent, reason = selection.agent, selection.reason
+
+            if reason == 'ambiguous':
+                # Several agents in play and the rules cannot tell which is spoken to: ask the LLM, if allowed. If it
+                # is not, or its answer is unusable, the first agent named answers (selection.agent).
+                routed = None
+                if worker.get_from_backpack('llm_routing'):
+                    last_speaker = None
+                    if worker.get_from_backpack('continuation'):
+                        last_speaker = next((a for a in selection.candidates if a.get('name') == worker.get_from_backpack('active_agent')), None)
+                    routed = self._route_with_llm(session_id, request_id, heard, selection.candidates, last_speaker)
+                if routed is not None:
+                    agent, reason = routed, 'llm_routed'
+                else:
+                    reason = 'first_named'
+
+            if agent is None:
+                # Nobody was addressed: tell the client, so it can go back to listening. Its conversation window (if
+                # any) carries on as it was.
+                logger.info(f"{ColoredText.BLUE_TEXT}Worker for sessionID {session_id} amd requestID {request_id}: no wake word and no conversation under way - not sent to the LLM. Heard: '{heard}'{ColoredText.END_TEXT}")
+                to_client = {
+                    'success': False,
+                    'type': 'not_addressed',
+                    'sessionID': session_id,
+                    'requestID': request_id,
+                    'file_size': 0,
+                    'transcription': heard,
+                    'message': "Audio received, but no conversation is taking place."
+                }
+                worker.send_to_client(to_client, None)
+                worker.shutdown()
+                return
+
+            logger.info(f"{ColoredText.BLUE_TEXT}Worker for sessionID {session_id} amd requestID {request_id}: agent '{agent['name']}' answers ({reason}).{ColoredText.END_TEXT}")
+
+            # If this agent missed part of the conversation (the user was talking to another agent), say what it
+            # missed at the front of the request. The client still gets back - and logs - only what the user said.
+            all_agents = worker.get_from_backpack('agents')
+            speaker = worker.get_from_backpack('speaker')
+            note = build_handoff_note(worker.get_from_backpack('recent_turns'), agent['name'],
+                                      {a.get('name'): a.get('display_name', '') for a in all_agents},
+                                      max_turns=worker.get_from_backpack('handoff_max_turns'),
+                                      max_chars=worker.get_from_backpack('handoff_max_chars'),
+                                      default_speaker=speaker)
+            if note:
+                logger.info(f"{ColoredText.BLUE_TEXT}Worker for sessionID {session_id} amd requestID {request_id}: handing '{agent['name']}' what it missed: {note.strip()}{ColoredText.END_TEXT}")
+
+            # Say who is talking (and, with several agents, to whom), so the agent never has to guess - it is saved
+            # in the agent's history with the words. Only for real speech: the canned "I didn't quite get that." is
+            # not something anyone said. The delimiter is taken out of what was heard so it can't hide the words.
+            user_request = transcription
+            if heard:
+                tag = speaker_tag(speaker, display_name(agent) if len(all_agents) > 1 else '')
+                user_request = tag + transcription.replace(HIDDEN_DELIMITER, ' ')
+
+            # From here on there is exactly one agent: cut the list down, and put its settings where the LLM and TTS
+            # stages look for them
+            worker.save_in_backpack('agents', [agent])
+            worker.save_in_backpack('agent_name', agent['name'])
+            worker.save_in_backpack('system_prompt_id', agent.get('system_prompt_id', 'default'))
+            worker.save_in_backpack('voice', agent.get('voice'))
             worker.save_in_backpack('transcription', transcription)
 
             job = {
@@ -490,12 +669,13 @@ class ConversationalAiServer:
                 'pipeline': pipeline,
                 'sessionID': session_id,
                 'requestID': request_id,
-                'user_request': transcription,
+                'user_request': note + user_request,
+                'agent_name': agent['name'],
                 'user_id': worker.get_from_backpack('user_id'),
-                'system_prompt_id': worker.get_from_backpack('system_prompt_id'),
+                'system_prompt_id': agent.get('system_prompt_id', 'default'),
                 'player_name': worker.get_from_backpack('player_name'),
-                'continuous_save': worker.get_from_backpack('continuous_save'),
-                'load_previous': worker.get_from_backpack('load_previous')
+                'continuous_save': agent.get('continuous_save', False),
+                'load_previous': agent.get('load_previous', False)
             }
             worker.add_work(job)
 
@@ -547,12 +727,17 @@ class ConversationalAiServer:
             transcription = worker.get_from_backpack('transcription')
             llm_response = worker.get_from_backpack('llm_response')
 
+            # agent_name / system_prompt_id go back so the client can name this agent in a continuation
             to_client = {
                 'sessionID': session_id,
                 'requestID': request_id,
                 'success': True,
                 'transcription': transcription,
-                'llm_response': llm_response
+                'llm_response': llm_response,
+                'agent_name': worker.get_from_backpack('agent_name'),
+                'system_prompt_id': worker.get_from_backpack('system_prompt_id'),
+                # who the server took to be talking, so the client can record it in its recent turns
+                'speaker': worker.get_from_backpack('speaker')
             }
 
             worker.send_to_client(to_client, raw_data)

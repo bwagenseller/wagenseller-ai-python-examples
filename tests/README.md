@@ -33,6 +33,7 @@ Tests read it through `testlib/settings.py`, and a test that needs a missing set
 | `llama_python` | The python of the conda env with `llama_cpp` (the stream and agent suites). |
 | `agent_tools_python` | The python of the env that runs the agent's tool scripts. |
 | `bash_python` | The python of the env that runs `get_grades` (live and audit scripts only). |
+| `media_python` | The python of the env with sounddevice / pygame / webrtcvad (the conversational AI client check). |
 | `ai_tools_config_dir` | The tools' own config files (never in the repo): the `ai_tools` suite and the live scripts. |
 
 A suite whose python is not set is skipped. A baseline whose model is not in `model_dir` is skipped, not failed.
@@ -54,6 +55,7 @@ tests/
     baselines/
   client_server/                AmadeoServer / AmadeoClient (the shared socket layer)
   ai_tools/                     the agent's tool scripts (scripts/ai/ai-tools/)
+  conversational_ai/            the conversational AI pipeline: wake words, agents, ASR gate, client config
   security/                     network / file-write audits (run by hand; no suite)
 ```
 

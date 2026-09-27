@@ -38,6 +38,7 @@ model_here() {
 }
 
 run "idle-timeout setting reaches all three servers; client refuses bad modes" "$PY" check_server_idle_config.py
+run "one_shot: stateless, no session touched, in all three families" "$PY" check_one_shot.py
 
 OUT="$LOG_DIR/kb_server_config.json"
 compare "knowledge-base server config loader" baselines/kb_server_config_baseline.json \

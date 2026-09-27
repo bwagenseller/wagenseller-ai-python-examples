@@ -984,7 +984,7 @@
               "role": "system"
             },
             {
-              "content": "What boils water?## Use up to 64 tokens in your response; try to fill the entire token count, if it makes sense; do not mention the change in tokens or change in response pattern.##",
+              "content": "What boils water? Use up to 64 tokens in your response; try to fill the entire token count, if it makes sense; do not mention the change in tokens or change in response pattern.",
               "role": "user"
             }
           ],

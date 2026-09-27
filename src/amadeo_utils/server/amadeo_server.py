@@ -112,7 +112,9 @@ class AmadeoServer:
                                                                 worry - its set in this code. That said its probably best practice to set this.
                                             }
             additional_shutdown: A method that will be called from this class during shutdown. The single parameter is a string and will usually represent the session_id; this is helpful if
-                                the additional functionality has state that must be cleared upon exit. This is completely optional.
+                                the additional functionality has state that must be cleared upon exit. It runs once per persistent session,
+                                however the session ends: 'terminate_session', or the client disconnecting, vanishing or timing out. It runs
+                                in that client's connection thread. This is completely optional.
         """
         self.host = host
         self.port = port
@@ -316,6 +318,13 @@ class AmadeoServer:
         """
         session_id = None
         persistent = False
+        # additional_shutdown must run once for every persistent session this connection established, however the
+        # connection ends: a 'terminate_session', or the client vanishing / disconnecting / timing out. It used to run
+        # only on terminate, so a client that simply went away leaked whatever the hook frees (LLM sessions, the
+        # conversational server's ASR / LLM connections) for the life of the server. One-off (non-persistent)
+        # requests never establish a session, so they never run it.
+        session_established = False
+        shutdown_hook_ran = False
 
         try:
             logger.info(f"New client connected from {address[0]}:{address[1]}")
@@ -453,6 +462,7 @@ class AmadeoServer:
                                     'socket': client_socket,
                                     'created': time.time()
                                 }
+                                session_established = True
 
                             request['sessionID'] = session_id
 
@@ -541,6 +551,7 @@ class AmadeoServer:
 
                             # If the session_id exists and additional_shutdown is set, run the shutdown
                             if session_id and self.additional_shutdown is not None:
+                                shutdown_hook_ran = True
                                 self.additional_shutdown(session_id)
 
                             self.send_response(client_socket, termination_response, None)
@@ -658,6 +669,14 @@ class AmadeoServer:
             # Clean up connection and session
             if session_id:
                 self.cleanup_session(session_id)
+
+            # The client left without terminating: run the shutdown hook the terminate would have run (see above)
+            if session_established and not shutdown_hook_ran and session_id and self.additional_shutdown is not None:
+                try:
+                    logger.info(f"Session {session_id} ended without terminate_session - running its shutdown.")
+                    self.additional_shutdown(session_id)
+                except Exception as e:
+                    logger.error(f"Shutdown for session {session_id} failed: {e}")
 
             try:
                 client_socket.shutdown(socket.SHUT_RDWR)

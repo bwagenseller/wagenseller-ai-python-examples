@@ -5,5 +5,6 @@
     "llama_python": "~/miniforge3/envs/llama/bin/python",
     "agent_tools_python": "~/miniforge3/envs/agent-tools/bin/python",
     "bash_python": "~/miniforge3/envs/bash/bin/python",
+    "media_python": "~/miniforge3/envs/media/bin/python",
     "ai_tools_config_dir": "/path/to/configs/ai-tools"
 }

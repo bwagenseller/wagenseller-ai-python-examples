@@ -1670,17 +1670,14 @@ class LlamaUtils:
         Args:
             input_string (str): Your prompt, including 'hidden' instructions encased in your favorite delimiter (e.g., "##", "**", "[[", etc.).
             delimiter (str): The string that marks the start and end of the hidden instructions that will not be saved to the chat history (e.g., "##", "**", "[[", etc.).
-            escape_characters (bool): Sometimes, if special characters are used, you need to escape them; if they are not used this may not work. Give the option of escaping the characters.
+            escape_characters (bool): Kept so existing callers still work; it no longer changes anything. This is a plain (not regex) replace, so the
+                delimiter is always matched literally. It used to re.escape() the delimiter first, which turned '##' into '\\#\\#' - a string that
+                never occurs - so the delimiters were silently left in the prompt sent to the LLM.
 
         Returns:
             str: Your prompt with the instruction delimiters removed (but the instructions remain), with leading/trailing whitespace stripped.
         """
-        # Escape the delimiter, but only if we opt to: This is crucial! If the delimiter contains special regex characters (like '.', '*', '+'), re.escape() will escape them so they are treated as literal characters.
-        if escape_characters:
-            escaped_delimiter = re.escape(delimiter)
-            return input_string.replace(escaped_delimiter, "").strip()
-        else:
-            return input_string.replace(delimiter, "").strip()
+        return input_string.replace(delimiter, "").strip()
 
     @staticmethod
     def remove_instructions(input_string: str, delimiter: str) -> str:

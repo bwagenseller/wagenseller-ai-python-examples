@@ -433,6 +433,10 @@ class StreamBase:
         * command == 'request' (used for all LLM requests after the first one)
             * 'user_request' - The current request from the user. The LLM will generate a direct response to this.
             * no other fields needed
+        * command == 'one_shot' (a stateless question - no session needed, nothing remembered; see handle_one_shot())
+            * 'system_prompt' - the system prompt, sent as-is
+            * 'user_request' - the question
+            * 'max_tokens' - optional; the answer's token budget (clamped to ONE_SHOT_MAX_TOKENS)
         * command (anything else) (anything else counts as 'request', with a warning in the log)
             * 'user_request' - The current request from the user. The LLM will generate a direct response to this.
             * no other fields needed
@@ -451,6 +455,10 @@ class StreamBase:
         session_id = request.get('sessionID') # comes from AmadeoServer - at this point, we know its a legit session_id
         command = request.get('command', 'UNKNOWN')
         user_request = request.get('user_request')
+
+        if command == 'one_shot':
+            # Stateless: needs no session and touches none, so it is dispatched before any session handling
+            return self.handle_one_shot(request), None
 
         # just see if this session exists
         if self.get_session(session_id):
@@ -499,6 +507,63 @@ class StreamBase:
                     command = 'request'
 
                 return self.get_response(request), None
+
+    # A one-shot answer is a label or a short phrase (e.g. which agent was addressed), not a conversation turn
+    ONE_SHOT_MAX_TOKENS = 64
+    ONE_SHOT_DEFAULT_TOKENS = 16
+    # Longest system prompt / question accepted, in characters - far inside any context window this code runs with
+    ONE_SHOT_MAX_CHARS = 8000
+
+    def handle_one_shot(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Answers one stateless question: a system prompt and a user message in, a short answer out.
+
+        Nothing is remembered: no session is needed or created, and nothing is written to a chat history or the vector
+        database. Reasoning is always off (a one-shot answer is wanted quickly), and any the model produces anyway is
+        stripped. It queues for the generator like any other request (generating_gpu_lock, via generate_once()).
+
+        Built for the conversational pipeline, which asks which of several agents the user addressed; it knows nothing
+        about that use.
+
+        Args:
+            request: the client request; 'system_prompt' and 'user_request' (non-empty strings, at most
+                ONE_SHOT_MAX_CHARS each) and optionally 'max_tokens' (clamped to 1..ONE_SHOT_MAX_TOKENS).
+
+        Returns:
+            dict: success, type ('llm_response' or 'error'), response (the answer, trimmed), message, elapsed_time and
+                file_size (always 0).
+        """
+        start_time = time.time()
+
+        def error(message: str) -> Dict[str, Any]:
+            logger.warning(f"{ColoredText.YELLOW_TEXT}one_shot refused: {message}{ColoredText.END_TEXT}")
+            return {'success': False, 'type': 'error', 'response': '', 'message': message,
+                    'elapsed_time': time.time() - start_time, 'file_size': 0}
+
+        system_prompt = request.get('system_prompt')
+        user_request = request.get('user_request')
+        for field, value in (('system_prompt', system_prompt), ('user_request', user_request)):
+            if not isinstance(value, str) or not value.strip():
+                return error(f"'{field}' must be a non-empty string.")
+            if len(value) > StreamBase.ONE_SHOT_MAX_CHARS:
+                return error(f"'{field}' is longer than {StreamBase.ONE_SHOT_MAX_CHARS} characters.")
+
+        try:
+            max_tokens = int(request.get('max_tokens', StreamBase.ONE_SHOT_DEFAULT_TOKENS))
+        except (TypeError, ValueError):
+            return error("'max_tokens' must be an integer.")
+        max_tokens = max(1, min(max_tokens, StreamBase.ONE_SHOT_MAX_TOKENS))
+
+        messages = [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': user_request}]
+        try:
+            answer = self.generate_once(messages, [], max_tokens, False, f"one_shot:{request.get('sessionID', '')}", 0)
+        except RuntimeError as e:     # the models were released while this was queued (server shutting down)
+            return error(str(e))
+
+        elapsed = time.time() - start_time
+        logger.info(f"{ColoredText.BLUE_TEXT}one_shot answered in {elapsed:.2f} s: {answer.strip()!r}{ColoredText.END_TEXT}")
+        return {'success': True, 'type': 'llm_response', 'response': answer.strip(), 'message': '',
+                'elapsed_time': elapsed, 'file_size': 0}
 
     # ------------------------------------------------------------------------------------ Shared pieces of get_response
     #

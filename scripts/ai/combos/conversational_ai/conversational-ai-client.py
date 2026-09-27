@@ -20,6 +20,8 @@ import os
 import json
 from amadeo_utils.ai.llm.llama.subjective_constants import SubjectiveConstants
 from amadeo_utils.ai.combined.conversational_ai.conversational_ai import VALID_PIPELINES
+from amadeo_utils.ai.combined.conversational_ai.wake_words import build_agents, WAKE_WORD_MAX_POSITION
+from amadeo_utils.ai.combined.conversational_ai.handoff import HANDOFF_MAX_TURNS, HANDOFF_MAX_CHARS
 
 # Configure logging to show timestamps and log levels
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
@@ -38,6 +40,7 @@ class ConversationalAiPipelineClient:
     MIN_SPEECH_DURATION_MS = 300
     VOLUME_THRESHOLD = 0.03
     PIPELINE = 'basic_conversational'
+    VOICE = 'default'
 
     USER_ID = 'Bob'
     CONTINUOUS_SAVE = False
@@ -47,6 +50,14 @@ class ConversationalAiPipelineClient:
     # to its max_turn_seconds, 180 by default) with room for ASR and TTS on top. The library default (30 s) is far
     # too short for the agent server.
     RESPONSE_TIMEOUT_SECONDS = 300
+    # After an agent's reply finishes playing, speech that starts within this many seconds is treated as the next turn
+    # of that conversation, so no wake word is needed. After that, a wake word is needed again.
+    CONVERSATION_WINDOW_SECONDS = 25
+    # How many turns of the current conversation the client remembers for handoff notes. The server only uses the
+    # turns an agent missed (at most handoff_max_turns of them), so this just needs to be comfortably larger.
+    RECENT_TURNS_KEPT = 10
+    # Ask the LLM which agent was addressed when several are named and the rules can't tell (see routing.py)
+    LLM_ROUTING = True
 
     # type hints
     socket_client: AmadeoClient
@@ -64,13 +75,34 @@ class ConversationalAiPipelineClient:
 
         self.pipeline = self.args_dict['pipeline']
 
-        self.voice = self.args_dict['voice']
-
         self.player_name = self.args_dict['player_name']
         self.user_id = self.args_dict['user_id']
-        self.system_prompt_id = self.args_dict['system_prompt_id']
-        self.continuous_save = self.args_dict['continuous_save']
-        self.load_previous = self.args_dict['load_previous']
+
+        # Every agent (see amadeo_utils...wake_words.build_agents()). All of them go to the server with each request;
+        # the server decides which one, if any, was spoken to.
+        self.agents = self.args_dict['agents']
+        self.voice = self.agents[0]['voice']    # the revoice pipeline has no agents, so it uses the first one's voice
+        self.conversation_window_seconds = self.args_dict['conversation_window_seconds']
+        self.wake_word_max_position = self.args_dict['wake_word_max_position']
+
+        # The conversation under way, if any: which agent it is with, and the time (time.time()) by which the user
+        # must start speaking for their speech to count as the next turn. Set when a reply finishes playing.
+        self.active_agent = ''
+        self.window_deadline = 0.0
+
+        # The turns of the conversation under way, oldest first: {'agent': name, 'speaker': who said it, 'user': what
+        # was said, 'reply': the answer}. Sent with each request so an agent can be told what was said to the others
+        # (see handoff.py).
+        # Cleared when the conversation ends.
+        self.recent_turns = []
+        self.handoff_max_turns = self.args_dict['handoff_max_turns']
+        self.handoff_max_chars = self.args_dict['handoff_max_chars']
+        # When several agents are named and the server's rules can't tell which one is spoken to, may it ask the LLM?
+        # (Off: the first agent named answers, with no extra LLM call.)
+        self.llm_routing = self.args_dict['llm_routing']
+
+        names = ', '.join(f"{a['name']} {a['wake_words'] or '(always listening)'}" for a in self.agents)
+        logger.info(f"{ColoredText.BLUE_TEXT}Agents: {names}{ColoredText.END_TEXT}")
 
         self.file_iterator = -1
 
@@ -94,7 +126,10 @@ class ConversationalAiPipelineClient:
             if not response.get('success', False):
                 # Handle different error/status types
                 message = response.get("message", "Unknown error")
-                if "busy" in message.lower():
+                if response.get('type') == 'not_addressed':
+                    # No wake word, and not part of a conversation - the server heard it and ignored it
+                    logger.info(f"{ColoredText.BLUE_TEXT}Not addressed to an agent (ignored): {response.get('transcription', '')}{ColoredText.END_TEXT}")
+                elif "busy" in message.lower():
                     logger.warning(f"{ColoredText.CYAN_TEXT}[Server busy, please wait for a moment.{ColoredText.END_TEXT}")
                 elif "queued" in message.lower():
                     # Optionally show queued status
@@ -147,6 +182,9 @@ class ConversationalAiPipelineClient:
                 llm_response = response.get('llm_response', '')
                 sessionID = response.get('sessionID', '')
                 requestID = response.get('requestID', '')
+                agent_name = response.get('agent_name', '')
+                # who the server took to be talking (our player_name, until voice recognition says otherwise)
+                speaker = response.get('speaker') or self.player_name
 
 
                 # Create in-memory audio buffer instead of file
@@ -160,12 +198,20 @@ class ConversationalAiPipelineClient:
                 #    f.write(raw_data)
 
                 logger.info(f"{ColoredText.YELLOW_TEXT}You:{ColoredText.END_TEXT} {transcription}")
-                logger.info(f"{ColoredText.GREEN_TEXT}Response:{ColoredText.END_TEXT} {llm_response}")
+                logger.info(f"{ColoredText.GREEN_TEXT}{agent_name or 'Response'}:{ColoredText.END_TEXT} {llm_response}")
                 #logger.info(f"{ColoredText.BLUE_TEXT}sessionID: {sessionID} requestID: {requestID} audio file: {output_file}{ColoredText.END_TEXT}")
                 logger.info(f"{ColoredText.BLUE_TEXT}sessionID: {sessionID} requestID: {requestID} {ColoredText.END_TEXT}")
 
-                # Play audio
+                # Play audio (this blocks until playback ends)
                 self.play_audio(audio_buffer)
+
+                # The conversation window opens now that the reply has finished playing
+                if agent_name:
+                    self.recent_turns.append({'agent': agent_name, 'speaker': speaker, 'user': transcription, 'reply': llm_response})
+                    del self.recent_turns[:-ConversationalAiPipelineClient.RECENT_TURNS_KEPT]
+                    self.active_agent = agent_name
+                    self.window_deadline = time.time() + self.conversation_window_seconds
+                    logger.info(f"{ColoredText.BLUE_TEXT}Talking with {agent_name}: {self.conversation_window_seconds:g} s to reply without a wake word.{ColoredText.END_TEXT}")
 
 
             else:
@@ -304,6 +350,10 @@ class ConversationalAiPipelineClient:
             # Prevents sending audio before the user has started speaking
             has_spoken = False
 
+            # When (time.time()) the speech in the buffer started. Whether it counts as the next turn of a
+            # conversation depends on when the user STARTED speaking, not when they finished.
+            speech_started_at = 0.0
+
 
             # ============================================================================
             # MAIN AUDIO CAPTURE LOOP
@@ -356,6 +406,8 @@ class ConversationalAiPipelineClient:
                     is_actual_speech = is_speech and is_loud_enough
 
                     if is_actual_speech:
+                        if not has_spoken:
+                            speech_started_at = time.time()
                         has_spoken = True
 
                         # Reset silence counter since we're actively receiving speech
@@ -413,19 +465,29 @@ class ConversationalAiPipelineClient:
                                         voice=self.voice
                                     )
                                 elif self.pipeline == 'basic_conversational':
+                                    # The next turn of the conversation under way, if the user started speaking in time
+                                    continuation = bool(self.active_agent) and speech_started_at <= self.window_deadline
+                                    if not continuation:
+                                        self.recent_turns = []      # a new conversation starts from nothing
                                     response, raw_data = self.socket_client.send_persistent_request(
                                         command=self.pipeline, # not really needed but is part of the structure, so - just repeat pipeline.
                                         message="Audio chunk",
                                         binary_data=speech_segment_bytes, # Send as binary data after JSON
                                         pipeline=self.pipeline, # necessary
-                                        voice=self.voice,
                                         user_id=self.user_id,
-                                        system_prompt_id=self.system_prompt_id,
                                         player_name=self.player_name,
-                                        continuous_save=self.continuous_save,
-                                        load_previous=self.load_previous
+                                        speaker=self.player_name,   # who is talking; voice recognition will set this later
+                                        agents=self.agents,
+                                        continuation=continuation,
+                                        active_agent=self.active_agent if continuation else '',
+                                        wake_word_max_position=self.wake_word_max_position,
+                                        recent_turns=self.recent_turns,
+                                        handoff_max_turns=self.handoff_max_turns,
+                                        handoff_max_chars=self.handoff_max_chars,
+                                        llm_routing=self.llm_routing
                                     )
-                                    # Response is handled automatically by handle_server_response callback
+                                    # Response is handled automatically by handle_server_response callback. A reply
+                                    # from an agent (re)opens the conversation window there.
 
                                 # A failed request (usually a timeout) leaves the socket unusable: the server may still
                                 # send the late reply, which would then be read as the reply to the NEXT request.
@@ -436,6 +498,12 @@ class ConversationalAiPipelineClient:
                                 current_audio_buffer = bytearray()
                                 silent_frames_count = 0
                                 has_spoken = False
+
+                                # The microphone was not read while we waited for the server and played the reply, so
+                                # its queue may hold that stale audio - including the agent's own voice from the
+                                # speaker, which could otherwise be sent back as the "next turn". Throw it away.
+                                if stream.read_available > 0:
+                                    stream.read(stream.read_available)
                             else:
                                 # The audio segment is shorter than minimum duration threshold
                                 # This could be a brief utterance, mouth noise, or incomplete word
@@ -452,6 +520,12 @@ class ConversationalAiPipelineClient:
                     else:
                         # No speech detected yet, and no prior speech in buffer
                         # Just monitor ambient noise levels for debugging
+
+                        # Close a conversation whose window has run out, so it is clear a wake word is needed again
+                        if self.active_agent and time.time() > self.window_deadline:
+                            logger.info(f"{ColoredText.BLUE_TEXT}Conversation with {self.active_agent} ended - say a wake word to start another.{ColoredText.END_TEXT}")
+                            self.active_agent = ''
+                            self.recent_turns = []
 
                         # Log volume periodically (every ~1 second) to help with threshold tuning
                         # int(time.time() * 10) % 10 == 0 creates a trigger every 10 time units (1 sec)
@@ -490,20 +564,40 @@ class ConversationalAiPipelineClient:
                 "host": "127.0.0.1",
                 "port": 65400,
 
-                'vad_frame_duration': 30,
-                'vad_aggressiveness': 2,
-                'silence_duration': 800,
+                "vad_frame_duration": 30,
+                "vad_aggressiveness": 2,
+                "silence_duration": 800,
 
-                'pipeline': "basic_conversational",
+                "pipeline": "basic_conversational",
 
-                'voice': "default",
+                "player_name": "Alex",
+                "user_id": "alex",
 
-                'player_name': "Brent",
-                'user_id': "Bob",
-                'system_prompt_id': "default",
-                'continuous_save': true,
-                'load_previous': true
+                "conversation_window_seconds": 25,
+                "wake_word_max_position": 10,
+                "handoff_max_turns": 3,
+                "handoff_max_chars": 600,
+                "llm_routing": true,
+
+                "agent_defaults": {
+                    "voice": "heart",
+                    "continuous_save": true,
+                    "load_previous": true
+                },
+                "agents": [
+                    {"name": "rose", "wake_words": ["rose", "hey rose"], "system_prompt_id": "assistant-rose"},
+                    {"name": "crane", "display_name": "Frasier", "wake_words": ["dr crane", "frasier"],
+                     "system_prompt_id": "assistant-frasier", "voice": "frasier", "load_previous": false}
+                ]
             }
+
+            Each agent starts from agent_defaults and overrides it with its own keys. An agent with no wake words is
+            always listening. display_name (default: the name in title case) is how handoff notes refer to an
+            agent when the user switches from it to another mid-conversation; handoff_max_turns 0 turns notes off.
+            llm_routing lets the server ask the LLM who was addressed when several agents are named and the rules
+            (punctuation) can't tell; off, the first agent named answers.
+            The older single-agent form - 'voice', 'system_prompt_id', 'continuous_save' and
+            'load_previous' at the top level, with no 'agents' - still works: it becomes one always-listening agent.
 
         Raises:
             FileNotFoundError: If the specified file does not exist.
@@ -527,7 +621,15 @@ class ConversationalAiPipelineClient:
             'user_id': str,
             'system_prompt_id': str,
             'continuous_save': bool,
-            'load_previous': bool
+            'load_previous': bool,
+            'response_timeout_seconds': (int, float),
+            'conversation_window_seconds': (int, float),
+            'wake_word_max_position': int,
+            'handoff_max_turns': int,
+            'handoff_max_chars': int,
+            'llm_routing': bool,
+            'agent_defaults': dict,   # the agent keys are checked by build_agents()
+            'agents': list
         }
 
         if not os.path.exists(filepath):
@@ -561,14 +663,31 @@ class ConversationalAiPipelineClient:
             if field in data:  # Only process if present
                 value = data[field]
                 if not isinstance(value, expected_type):
+                    # expected_type may be a tuple of types (e.g. int or float)
+                    types = expected_type if isinstance(expected_type, tuple) else (expected_type,)
                     raise TypeError(
                         f"Error: Optional field '{field}' in '{filepath}' has unexpected type "
-                        f"'{type(value).__name__}', expected '{expected_type.__name__}'."
+                        f"'{type(value).__name__}', expected '{' or '.join(t.__name__ for t in types)}'."
                     )
                 scraped_data[field] = value
 
         return scraped_data
 
+
+    @staticmethod
+    def agent_fallback() -> dict:
+        """
+        The agent settings used when neither an agent nor agent_defaults sets them (see build_agents()).
+
+        Returns:
+            dict: voice, system_prompt_id, continuous_save and load_previous.
+        """
+        return {
+            'voice': ConversationalAiPipelineClient.VOICE,
+            'system_prompt_id': SubjectiveConstants.SYSTEM_PROMPT_ID,
+            'continuous_save': ConversationalAiPipelineClient.CONTINUOUS_SAVE,
+            'load_previous': ConversationalAiPipelineClient.LOAD_PREVIOUS,
+        }
 
     """
     Gets args dictionary for a generic WhisperX streaming client  
@@ -583,7 +702,7 @@ class ConversationalAiPipelineClient:
         parser.add_argument("-va", "--vad-aggressiveness", type=int, default=ConversationalAiPipelineClient.VAD_AGGRESSIVENESS, help="The VAD aggressiveness, from 1 to 3. 3 = block most non-human speech, 1 = be a bit more permissive.")
         parser.add_argument("-sd", "--silence-duration", type=int, default=ConversationalAiPipelineClient.SILENCE_DURATION_TO_END_BUFFER_MS, help="The number of milliseconds that must pass that will denote an end to speech (and the beginning of processing the speech segment).")
         parser.add_argument("-pi", "--pipeline", type=str, default=ConversationalAiPipelineClient.PIPELINE, help=f"The pipeline desired - you will send an audio clip to the server. What do you get back, and what do you do with it? The pipeline defines this. Can be: {VALID_PIPELINES}")
-        parser.add_argument("-v", '--voice', type=str, default='default', help='Voice to use from the Text-To-Speech AI (revoice, basic_conversational pipelines only)')
+        parser.add_argument("-v", '--voice', type=str, default=ConversationalAiPipelineClient.VOICE, help='Voice to use from the Text-To-Speech AI (revoice, basic_conversational pipelines only)')
 
         parser.add_argument("-pn", "--player-name", type=str, default=SubjectiveConstants.BASE_PLAYER_NAME,help="Give your username - How should the LLM address you? Leave blank if you do not want it addressing you directly via name (basic_conversational pipeline only).")
         parser.add_argument("-uid", "--user-id", type=str, default=ConversationalAiPipelineClient.USER_ID,help="A name or identification for this user. This is different from player-name - this is how the SYSTEM identifies you; think of it like an account (basic_conversational pipeline only).")
@@ -611,30 +730,29 @@ class ConversationalAiPipelineClient:
                     argDict['host'] = config_dict.get('host', ConversationalAiPipelineClient.HOST)
                     argDict['port'] = config_dict.get('port', ConversationalAiPipelineClient.PORT)
 
-                    argDict['vad_frame_duration'] = config_dict.get('vad_frame_duration', ConversationalAiPipelineClient.PORT)
-                    argDict['vad_aggressiveness'] = config_dict.get('vad_aggressiveness', ConversationalAiPipelineClient.PORT)
-                    argDict['silence_duration'] = config_dict.get('silence_duration', ConversationalAiPipelineClient.PORT)
+                    argDict['vad_frame_duration'] = config_dict.get('vad_frame_duration', ConversationalAiPipelineClient.VAD_FRAME_DURATION_MS)
+                    argDict['vad_aggressiveness'] = config_dict.get('vad_aggressiveness', ConversationalAiPipelineClient.VAD_AGGRESSIVENESS)
+                    argDict['silence_duration'] = config_dict.get('silence_duration', ConversationalAiPipelineClient.SILENCE_DURATION_TO_END_BUFFER_MS)
 
-                    argDict['pipeline'] = config_dict.get('pipeline', ConversationalAiPipelineClient.PORT)
-
-                    argDict['voice'] = config_dict.get('voice', ConversationalAiPipelineClient.PORT)
+                    argDict['pipeline'] = config_dict.get('pipeline', ConversationalAiPipelineClient.PIPELINE)
 
                     argDict['player_name'] = config_dict.get('player_name', SubjectiveConstants.BASE_PLAYER_NAME)
-                    argDict['system_prompt_id'] = config_dict.get('system_prompt_id', SubjectiveConstants.SYSTEM_PROMPT_ID)
                     argDict['user_id'] = config_dict.get('user_id', ConversationalAiPipelineClient.USER_ID)
-                    argDict['continuous_save'] = config_dict.get('continuous_save', ConversationalAiPipelineClient.CONTINUOUS_SAVE)
-                    argDict['load_previous'] = config_dict.get('load_previous', ConversationalAiPipelineClient.LOAD_PREVIOUS)
                     argDict['response_timeout_seconds'] = config_dict.get('response_timeout_seconds', ConversationalAiPipelineClient.RESPONSE_TIMEOUT_SECONDS)
+                    argDict['conversation_window_seconds'] = config_dict.get('conversation_window_seconds', ConversationalAiPipelineClient.CONVERSATION_WINDOW_SECONDS)
+                    argDict['wake_word_max_position'] = config_dict.get('wake_word_max_position', WAKE_WORD_MAX_POSITION)
+                    argDict['handoff_max_turns'] = config_dict.get('handoff_max_turns', HANDOFF_MAX_TURNS)
+                    argDict['handoff_max_chars'] = config_dict.get('handoff_max_chars', HANDOFF_MAX_CHARS)
+                    argDict['llm_routing'] = config_dict.get('llm_routing', ConversationalAiPipelineClient.LLM_ROUTING)
 
-                    if argDict['pipeline'] not in VALID_PIPELINES:
-                        logger.warning(f"{ColoredText.YELLOW_TEXT}Pipeline {argDict['pipeline']} not in list {VALID_PIPELINES} - setting to {VALID_PIPELINES[0]}.{ColoredText.END_TEXT}")
-                        argDict['pipeline'] = VALID_PIPELINES[0]
+                    # agent_defaults + agents (or the older top-level voice / system_prompt_id / ... keys)
+                    argDict['agents'] = build_agents(config_dict, ConversationalAiPipelineClient.agent_fallback())
 
                     logger.info(f"Config loaded from JSON {json_config_file}.")
 
                     use_default_arg_config = False
 
-                except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError) as e:
+                except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                     logger.warning(f"Could not load JSON config [{json_config_file}] - there are errors. Will attempt to load other defaults or args. Error: {e}.")
 
             elif json_config_file:
@@ -648,20 +766,26 @@ class ConversationalAiPipelineClient:
                 argDict['vad_aggressiveness'] = args.vad_aggressiveness
                 argDict['silence_duration'] = args.silence_duration
                 argDict['pipeline'] = args.pipeline
-                argDict['voice'] = args.voice
 
                 argDict['player_name'] = args.player_name
-                argDict['system_prompt_id'] = args.system_prompt_id
                 argDict['user_id'] = args.user_id
-                argDict['continuous_save'] = args.continuous_save
-                argDict['load_previous'] = args.load_previous
                 argDict['response_timeout_seconds'] = args.response_timeout_seconds
+                argDict['conversation_window_seconds'] = ConversationalAiPipelineClient.CONVERSATION_WINDOW_SECONDS
+                argDict['wake_word_max_position'] = WAKE_WORD_MAX_POSITION
+                argDict['handoff_max_turns'] = HANDOFF_MAX_TURNS
+                argDict['handoff_max_chars'] = HANDOFF_MAX_CHARS
+                argDict['llm_routing'] = ConversationalAiPipelineClient.LLM_ROUTING
 
-                if argDict['pipeline'] not in VALID_PIPELINES:
-                    logger.warning(f"{ColoredText.YELLOW_TEXT}Pipeline {argDict['pipeline']} not in list {VALID_PIPELINES} - setting to {VALID_PIPELINES[0]}.{ColoredText.END_TEXT}")
-                    argDict['pipeline'] = VALID_PIPELINES[0]
+                # The command line describes one agent, with no wake words: it is always listening, as before
+                argDict['agents'] = build_agents({'voice': args.voice, 'system_prompt_id': args.system_prompt_id,
+                                                  'continuous_save': args.continuous_save, 'load_previous': args.load_previous},
+                                                 ConversationalAiPipelineClient.agent_fallback())
 
                 logger.debug(f"{ColoredText.BLUE_TEXT}ConversationalAiPipelineClient.get_args_dict_client: Config loaded; host: {argDict['host']} port: {argDict['port']}.{ColoredText.END_TEXT}")
+
+            if argDict['pipeline'] not in VALID_PIPELINES:
+                logger.warning(f"{ColoredText.YELLOW_TEXT}Pipeline {argDict['pipeline']} not in list {VALID_PIPELINES} - setting to {VALID_PIPELINES[0]}.{ColoredText.END_TEXT}")
+                argDict['pipeline'] = VALID_PIPELINES[0]
 
         except SystemExit as e:
             argDict = {}
@@ -677,5 +801,7 @@ class ConversationalAiPipelineClient:
 
 if __name__ == "__main__":
     argsDict = ConversationalAiPipelineClient.get_args_dict_streaming_client()
+    if not argsDict:
+        sys.exit(1)                 # --help, or invalid arguments (already reported)
     client = ConversationalAiPipelineClient(argsDict)
     client.run_client()
