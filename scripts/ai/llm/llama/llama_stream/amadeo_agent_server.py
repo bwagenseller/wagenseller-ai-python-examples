@@ -1,6 +1,7 @@
 import logging
 import sys
 from amadeo_utils.server.amadeo_server import AmadeoServer
+from amadeo_utils.logging_utils import add_log_file
 from amadeo_utils.ai.llm.llama.ToolStream import ToolStream
 
 # Configure logging to show timestamps and log levels
@@ -33,5 +34,7 @@ if __name__ == "__main__":
     argsDict = ToolStream.get_args_dict()
     if not argsDict:
         sys.exit(1)
+    # The log goes to the screen, and also to 'log_file' if the config names one (see amadeo_utils.logging_utils)
+    add_log_file(argsDict.get('log_file'))
     server = AmadeoAgentServer(argsDict)
     server.server.start_server()

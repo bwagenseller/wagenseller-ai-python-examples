@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CS-22: the conversational AI client's config loader (get_args_dict_streaming_client).
+"""CS-22 / CS-23: the conversational AI client's config loader (get_args_dict_streaming_client).
 
 Why
 ---
@@ -16,6 +16,10 @@ What it proves (the real client script, loaded from scripts/ - nothing is record
 4. A config with a bad agent list is reported and the command-line defaults are used instead (the loader's
    long-standing fallback), rather than the client crashing.
 5. Command-line arguments become one always-listening agent.
+6. Voice recognition (CS-23): voice_recognition (default off) and location_id (default none) come from JSON or the
+   command line; so do save_known_field_clips / save_unknown_field_clips (default off: a client opts its microphone
+   in); allow_unknown_speakers is per agent (default true) and can be set in agent_defaults;
+   allowed_speakers is per agent (default empty: anyone).
 
 Usage:  python check_client_config.py      (a Python with sounddevice, pygame, webrtcvad and numpy - the media env)
 """
@@ -107,6 +111,35 @@ check("duplicate agent names: JSON rejected, command line used", (a['host'], a['
 a = load(argv=['--voice', 'bella', '--system-prompt-id', 'solo'])
 check("command line: one always-listening agent",
       [(x['name'], x['voice'], x['system_prompt_id'], x['wake_words']) for x in a['agents']], [('default', 'bella', 'solo', [])])
+
+# 6. voice recognition
+a = load({'host': 'h', 'port': 1})
+check("voice recognition is off and there is no location unless configured", (a['voice_recognition'], a['location_id']), (False, ''))
+a = load({'host': 'h', 'port': 1, 'voice_recognition': True, 'location_id': 'kitchen',
+          'agent_defaults': {'allow_unknown_speakers': False},
+          'agents': [{'name': 'rose'}, {'name': 'crane', 'allow_unknown_speakers': True}]})
+check("voice_recognition and location_id come from JSON", (a['voice_recognition'], a['location_id']), (True, 'kitchen'))
+check("allow_unknown_speakers per agent, from agent_defaults or the agent",
+      [(x['name'], x['allow_unknown_speakers']) for x in a['agents']], [('rose', False), ('crane', True)])
+check("allow_unknown_speakers defaults to true", load({'host': 'h', 'port': 1})['agents'][0]['allow_unknown_speakers'], True)
+a = load({'host': 'h', 'port': 1, 'voice_recognition': True,
+          'agents': [{'name': 'rose'}, {'name': 'crane', 'allowed_speakers': ['Sam']}]})
+check("allowed_speakers per agent, defaulting to empty", [(x['name'], x['allowed_speakers']) for x in a['agents']],
+      [('rose', []), ('crane', ['Sam'])])
+a = load({'host': 'json-host', 'port': 1, 'voice_recognition': 'yes'}, argv=['--host', 'cli-host'])
+check("a non-boolean voice_recognition rejects the JSON", a['host'], 'cli-host')
+a = load(argv=['--voice-recognition', '--location-id', 'office'])
+check("command line: --voice-recognition and --location-id", (a['voice_recognition'], a['location_id']), (True, 'office'))
+
+# field clips: opt-in per client
+a = load({'host': 'h', 'port': 1})
+check("field clips are off unless the client opts in", (a['save_known_field_clips'], a['save_unknown_field_clips']), (False, False))
+a = load({'host': 'h', 'port': 1, 'voice_recognition': True, 'save_unknown_field_clips': True})
+check("save_*_field_clips come from JSON, each on its own", (a['save_known_field_clips'], a['save_unknown_field_clips']), (False, True))
+a = load({'host': 'json-host', 'port': 1, 'save_known_field_clips': 'yes'}, argv=['--host', 'cli-host'])
+check("a non-boolean save_known_field_clips rejects the JSON", (a['host'], a['save_known_field_clips']), ('cli-host', False))
+a = load(argv=['--save-known-field-clips'])
+check("command line: --save-known-field-clips", (a['save_known_field_clips'], a['save_unknown_field_clips']), (True, False))
 
 print(f"\n{len(failures)} failure(s)")
 sys.exit(len(failures))

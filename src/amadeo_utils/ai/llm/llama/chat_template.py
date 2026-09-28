@@ -1192,7 +1192,7 @@ class ReasoningStreamFilter:
         return stable
 
     def _hold_stop_prefix(self, text: str) -> str:
-        """Holds back a tail that could be the start of an answer stop ('Bre' of 'Brent:')."""
+        """Holds back a tail that could be the start of an answer stop ('Kev' of 'Kevin:')."""
         for stop in self._answer_stops:
             for k in range(len(stop) - 1, 0, -1):
                 if text.endswith(stop[:k]):

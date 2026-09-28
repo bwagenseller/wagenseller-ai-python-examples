@@ -28,6 +28,13 @@ AGENT_KEYS = {
     'voice': str,
     'continuous_save': bool,
     'load_previous': bool,
+    # With voice recognition on, may this agent answer a voice nobody has enrolled? False gates it to known voices
+    # (see speakers.refuses_unknown_speaker); defaults to True
+    'allow_unknown_speakers': bool,
+    # With voice recognition on, the only speakers this agent answers (their names as the agents hear them - the
+    # voice profiles' display names, matched ignoring case); anyone else, an unrecognized voice included, is refused
+    # even mid-conversation (see speakers.refuses_unlisted_speaker). Empty (the default) means no restriction.
+    'allowed_speakers': list,
 }
 
 # Apostrophes are deleted, so "Rose's" becomes "roses" (a possessive is talk ABOUT Rose, and must not match "rose").
@@ -320,7 +327,8 @@ def build_agents(config: Dict[str, Any], fallback: Dict[str, Any]) -> List[Dict[
     style: no 'agents' key, so one agent named 'default' is built from the top-level keys, with no wake words
     (always listening, the behaviour before wake words existed).
 
-    Missing keys come from fallback, which must hold every key in AGENT_KEYS except 'name' and 'wake_words'.
+    Missing keys come from fallback, which must hold every key in AGENT_KEYS except 'name', 'wake_words',
+    'display_name', 'allow_unknown_speakers' and 'allowed_speakers' (these last three have their own defaults).
 
     Args:
         config: the client config dictionary (the parsed JSON file, or the command-line arguments).
@@ -364,6 +372,8 @@ def build_agents(config: Dict[str, Any], fallback: Dict[str, Any]) -> List[Dict[
         if not name or not isinstance(name, str):
             raise ValueError(f"Agent #{index + 1} has no 'name'.")
         agent.setdefault('display_name', name.title())
+        agent.setdefault('allow_unknown_speakers', True)
+        agent.setdefault('allowed_speakers', [])
         if name in seen_names:
             raise ValueError(f"Two agents are named '{name}'.")
         seen_names.add(name)
@@ -379,6 +389,10 @@ def build_agents(config: Dict[str, Any], fallback: Dict[str, Any]) -> List[Dict[
             if key in seen_wake_words and seen_wake_words[key] != name:
                 raise ValueError(f"Wake word '{wake_word}' is used by both '{seen_wake_words[key]}' and '{name}'.")
             seen_wake_words[key] = name
+
+        for speaker in agent['allowed_speakers']:
+            if not isinstance(speaker, str) or not speaker.strip():
+                raise ValueError(f"Agent '{name}': every allowed speaker must be a non-empty name (got {speaker!r}).")
 
         agents.append(agent)
 

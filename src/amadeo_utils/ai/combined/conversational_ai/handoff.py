@@ -6,17 +6,18 @@ sees "user" and "assistant". Unless it is told who is talking, a model fills the
 (Santa once called the user "Rose", after the agent the user had just been talking to). So every request is tagged
 with who is speaking and, when the client has several agents, to whom:
 
-    [Brent, to Santa]: what do you think about that?
+    [Kevin, to Santa]: what do you think about that?
 
 The tag is saved in the agent's chat history with the words, so the history keeps saying who spoke each line. The
-speaker is the client's player_name for now; voice recognition can fill it in later without anything here changing.
+speaker is the client's player_name, or - with voice recognition on - the voice the ASR server recognized (see
+speakers.py); nothing here depends on which.
 
 Handoff notes. Each agent has its own LLM session and chat history, so when the user talks to Rose and then says
 "Hey Frasier, what do you think about that?", Frasier has never heard what "that" was. A handoff note fixes this
 without sharing histories: the turns the answering agent missed go in front of its request, naming everyone:
 
-    (Since you last spoke: Brent said to Rose: "Should I repaint the deck?" Rose replied: "Yes, before the frost.")
-    [Brent, to Frasier]: Hey Frasier, what do you think about that?
+    (Since you last spoke: Kevin said to Rose: "Should I repaint the deck?" Rose replied: "Yes, before the frost.")
+    [Kevin, to Frasier]: Hey Frasier, what do you think about that?
 
 The note is saved in the agent's chat history with the rest of the request, so the agent can bring up what the
 others said on later turns too - characters do, and it makes the conversation feel shared. That is also why it names
@@ -110,7 +111,7 @@ def speaker_tag(speaker: str, addressee: str = '') -> str:
             obvious, and an always-listening agent's internal name ('default') means nothing to the model.
 
     Returns:
-        str: e.g. '[Brent, to Santa]: ' or '[Brent]: ', or '' with no speaker.
+        str: e.g. '[Kevin, to Santa]: ' or '[Kevin]: ', or '' with no speaker.
     """
     speaker = clean_name(speaker)
     if not speaker:

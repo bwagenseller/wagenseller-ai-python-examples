@@ -6,5 +6,7 @@
     "agent_tools_python": "~/miniforge3/envs/agent-tools/bin/python",
     "bash_python": "~/miniforge3/envs/bash/bin/python",
     "media_python": "~/miniforge3/envs/media/bin/python",
-    "ai_tools_config_dir": "/path/to/configs/ai-tools"
+    "ai_tools_config_dir": "/path/to/configs/ai-tools",
+    "stt_python": "~/miniforge3/envs/stt/bin/python",
+    "speaker_id_voices_dir": "/path/to/synthetic-voices"
 }

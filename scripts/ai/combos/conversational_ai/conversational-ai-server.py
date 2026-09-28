@@ -1,6 +1,7 @@
 import sys
 import logging
 from amadeo_utils.ai.combined.conversational_ai.conversational_ai import ConversationalAiServer
+from amadeo_utils.logging_utils import add_log_file
 
 
 """
@@ -58,4 +59,6 @@ if __name__ == "__main__":
     argsDict = ConversationalAiServer.get_args_dict_server()
     if not argsDict:
         sys.exit(1)                 # the reason (bad arguments or an invalid setting) has already been logged
+    # The log goes to the screen, and also to 'log_file' if the config names one (see amadeo_utils.logging_utils)
+    add_log_file(argsDict.get('log_file'))
     server = ConversationalAiPipelineServer(argsDict)

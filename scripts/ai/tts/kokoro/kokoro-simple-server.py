@@ -52,6 +52,7 @@ warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
 
 from amadeo_utils.ai.tts import kokoro
 from amadeo_utils.server.amadeo_server import AmadeoServer
+from amadeo_utils.logging_utils import add_log_file
 
 import logging
 from typing import Dict
@@ -74,6 +75,8 @@ class TTSServer:
 def main():
 
     arg_dict = kokoro.AmadeoKokoro.get_args_dict()
+    # The log goes to the screen, and also to 'log_file' if the config names one (see amadeo_utils.logging_utils)
+    add_log_file(arg_dict.get('log_file'))
 
     # Create and start the TTS server
     try:

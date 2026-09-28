@@ -14,6 +14,8 @@ import os
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 
 import threading
+import time
+import wave
 import json
 import gc
 import torch
@@ -24,6 +26,7 @@ import logging
 from typing import Dict, Any, Tuple
 from whisperx.audio import N_SAMPLES, log_mel_spectrogram
 from amadeo_utils.colored_text import ColoredText
+from amadeo_utils.ai.asr import speaker_id
 
 """
 This is a basic implementation of WhisperX, an ASR (speech to text) library. Its a basic implementation. It was primarily built for responding from a server (handle_client_request acts as a callback function for a larger server script), but you can use it independently, too, 
@@ -81,6 +84,33 @@ def detect_language_with_probability(asr_model, audio: np.ndarray) -> Tuple[str,
     return language_token[2:-2], language_probability
 
 
+def speech_span(aligned_result, total_seconds: float, pad_seconds: float = 0.15) -> Tuple[float, float, float]:
+    """
+    Where the speech is in a chunk, from WhisperX's aligned segments.
+
+    A chunk from the conversational client ends with the silence that told it the speaker had stopped (most of a
+    second), so its length says little about how much was said: a quick "yes" arrives as a one-second chunk. Speaker
+    identification needs the SPEECH - both to judge whether there is enough of it, and to embed the voice rather
+    than the room.
+
+    :param aligned_result: whisperx.align()'s result (segments with 'start' / 'end' in seconds), or None.
+    :param total_seconds: The chunk's length.
+    :param pad_seconds: Kept either side of the speech, so the first and last sounds are not clipped.
+    :return: (start, end, speech_seconds): the padded span to embed, and the seconds actually spoken (the segments'
+             total). With no usable timings: (0, total_seconds, total_seconds).
+    """
+    spans = []
+    for segment in (aligned_result or {}).get('segments', []):
+        start, end = segment.get('start'), segment.get('end')
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)) and end > start:
+            spans.append((float(start), float(end)))
+    if not spans:
+        return 0.0, total_seconds, total_seconds
+    start = max(0.0, min(s for s, _ in spans) - pad_seconds)
+    end = min(total_seconds, max(e for _, e in spans) + pad_seconds)
+    return start, end, sum(e - s for s, e in spans)
+
+
 class AmadeoWhisperX:
 
     MAX_POSITIVE_INT16_VALUE_AS_FLOAT = 32767.0
@@ -91,6 +121,18 @@ class AmadeoWhisperX:
     LANGUAGE_CODE = "en"
     COMBINED_CONFIDENCE_CUTOFF = 1.0
     GPU_INDEX = 0
+
+    # The keys of the server's --json config, with their types (see load_json_config)
+    SERVER_CONFIG_FIELDS = {
+        'host': str,
+        'port': int,
+        'model': str,
+        'language_code': str,
+        'gpu': int,
+        'combined_confidence_cutoff': (int, float),
+        'speaker_id': dict,
+        'log_file': str,        # also log to this file (see amadeo_utils.logging_utils); missing = screen only
+    }
 
     def __init__(self, argsDict: dict):
         self.args_dict = argsDict
@@ -173,6 +215,141 @@ class AmadeoWhisperX:
         self.align_model, self.metadata = whisperx.load_align_model(language_code=self.args_dict['language_code'], device=self.device)
         logger.info(f"{ColoredText.BLUE_TEXT}WhisperXServer: Alignment model loaded.{ColoredText.END_TEXT}")
 
+        # --- Speaker identification (optional; see amadeo_utils.ai.asr.speaker_id) ---
+        # Only set up when the server's config has a 'speaker_id' block. Without one, a request asking for voice
+        # recognition gets speaker_status 'disabled' and the conversational server treats the voice as unknown.
+        self.speaker_settings = None
+        self.speaker_embedder = None
+        self.speaker_index = speaker_id.SpeakerIndex([])
+        self.speaker_signature = None           # the profiles directory's fingerprint when the index was built
+        self.speaker_index_lock = threading.Lock()
+        self.field_expiry_lock = threading.Lock()
+        self.field_expired_at = 0.0             # when old field clips were last deleted (time.time())
+        speaker_config = self.args_dict.get('speaker_id')
+        if speaker_config:
+            # A bad config stops the server at startup, rather than silently running without recognition
+            self.speaker_settings = speaker_id.settings_from_dict(speaker_config, other_level_keys=AmadeoWhisperX.SERVER_CONFIG_FIELDS)
+            from amadeo_utils.ai.asr.speaker_embedder import SpeakerEmbedder
+            logger.info(f"{ColoredText.BLUE_TEXT}WhisperXServer: Loading speaker-embedding model '{self.speaker_settings.embedding_model}' on {self.device}...{ColoredText.END_TEXT}")
+            self.speaker_embedder = SpeakerEmbedder(self.speaker_settings.embedding_model, self.device)
+            index = self._current_speaker_index()
+            logger.info(f"{ColoredText.BLUE_TEXT}WhisperXServer: Speaker identification on: {len(index)} person(s) enrolled in {self.speaker_settings.profiles_dir}.{ColoredText.END_TEXT}")
+            settings = self.speaker_settings
+            if settings.save_known_field_clips or settings.save_unknown_field_clips:
+                kinds = ' and '.join(k for k, on in (('known', settings.save_known_field_clips), ('unrecognized', settings.save_unknown_field_clips)) if on)
+                kept = f"kept {settings.field_retention_days:g} days" if settings.field_retention_days > 0 else "kept for ever"
+                logger.info(f"{ColoredText.BLUE_TEXT}WhisperXServer: Saving {kinds} voices' speech to {settings.field_samples_dir} ({kept}), from clients that opt in.{ColoredText.END_TEXT}")
+                self._expire_field_clips()
+
+    def _current_speaker_index(self) -> speaker_id.SpeakerIndex:
+        """
+        The enrolled voices, reloaded whenever the profiles directory has changed (someone was enrolled or removed),
+        so an enrollment takes effect without restarting the server. Checking costs one directory listing.
+
+        :return: The SpeakerIndex to match against.
+        """
+        with self.speaker_index_lock:
+            signature = speaker_id.profiles_signature(self.speaker_settings.profiles_dir)
+            if signature != self.speaker_signature:
+                profiles = speaker_id.load_profiles(self.speaker_settings.profiles_dir, self.speaker_settings.embedding_model)
+                self.speaker_index = speaker_id.SpeakerIndex(profiles)
+                self.speaker_signature = signature
+                logger.info(f"{ColoredText.BLUE_TEXT}WhisperXServer: Voice profiles (re)loaded: {sorted(self.speaker_index.people)}.{ColoredText.END_TEXT}")
+            return self.speaker_index
+
+    def _expire_field_clips(self):
+        """
+        Deletes field clips older than the retention period. Runs at startup and then at most once an hour (from
+        whichever request saves a clip), so a server left running for months keeps the directory trimmed without a
+        separate job. Never raises: a clip that cannot be deleted is only logged.
+        """
+        now = time.time()
+        with self.field_expiry_lock:
+            if now - self.field_expired_at < 3600:
+                return
+            self.field_expired_at = now
+        removed = 0
+        for path in speaker_id.expired_field_clips(self.speaker_settings.field_samples_dir, self.speaker_settings.field_retention_days, now):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError as e:
+                logger.warning(f"Could not delete expired field clip {path}: {e}")
+        if removed:
+            logger.info(f"Deleted {removed} field clip(s) older than {self.speaker_settings.field_retention_days:g} days.")
+
+    def _save_field_clip(self, match: speaker_id.SpeakerMatch, location_id: str, speech_audio, client_known: bool = False,
+                         client_unknown: bool = False) -> None:
+        """
+        Saves the judged speech as a field clip when both the config and the client allow this kind (see
+        speaker_id.field_clip_kind),
+        under <field_samples_dir>/<location>/<person or 'unrecognized'>/, as 16 bit mono 16 kHz WAV - the audio
+        exactly as the live microphone delivered it, which is what enrollment wants. Clips are only ever reviewed
+        and moved into the samples tree by hand, never enrolled automatically: a misidentified clip fed back into a
+        profile would pull it toward the wrong person. Never raises: saving must not cost the transcription.
+
+        :param match: The speaker decision.
+        :param location_id: The request's location_id.
+        :param speech_audio: The speech that was judged (float32, -1..1, 16 kHz), or None if it was not embedded.
+        :param client_known: The request's save_known_field_clips (the client opting its microphone in).
+        :param client_unknown: The request's save_unknown_field_clips.
+        """
+        kind = speaker_id.field_clip_kind(self.speaker_settings, match.status, client_known, client_unknown)
+        if not kind or speech_audio is None or not len(speech_audio):
+            return
+        speaker_folder = (self.speaker_index.file_names.get(match.speaker, match.speaker) if kind == 'known'
+                          else speaker_id.FIELD_UNRECOGNIZED_FOLDER)
+        path = speaker_id.field_clip_path(self.speaker_settings.field_samples_dir, location_id, speaker_folder, time.time())
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            pcm = (np.clip(speech_audio, -1.0, 1.0) * AmadeoWhisperX.MAX_POSITIVE_INT16_VALUE_AS_FLOAT).astype(np.int16)
+            with wave.open(path, 'wb') as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(pcm.tobytes())
+            os.chmod(path, 0o660)      # biometric data: owner and group only
+            logger.debug(f"Field clip saved: {path}")
+        except Exception as e:
+            logger.warning(f"Could not save field clip {path}: {e}")
+        self._expire_field_clips()
+
+    def _speaker_fields(self, voice_recognition: bool, location_id: str, seconds: float, embedding, embed_error: str,
+                        speech_audio=None, client_field_clips: Tuple[bool, bool] = (False, False)) -> Dict[str, Any]:
+        """
+        Works out who spoke and returns the fields added to a transcription response.
+
+        :param voice_recognition: Whether the request asked for recognition. If not, no fields are added.
+        :param location_id: The client's location_id ('' for none); its enrolled samples are compared first.
+        :param seconds: How long the speech is (see speech_span).
+        :param embedding: The speech's embedding, or None if it was not computed.
+        :param embed_error: Why the embedding failed ('' if it did not).
+        :param speech_audio: The speech that was embedded, saved as a field clip if the config asks (see
+                             _save_field_clip); None if there was none.
+        :param client_field_clips: The request's (save_known_field_clips, save_unknown_field_clips).
+        :return: {} or {'speaker', 'speaker_score', 'speaker_status', 'speaker_step'} - speaker is a display name,
+                 speaker_id.UNRECOGNIZED_SPEAKER, or '' when the status leaves it to the caller (too_short, disabled,
+                 error).
+        """
+        if not voice_recognition:
+            return {}
+        if self.speaker_embedder is None:
+            match = speaker_id.SpeakerMatch(speaker_id.STATUS_DISABLED)
+        elif embed_error:
+            match = speaker_id.SpeakerMatch(speaker_id.STATUS_ERROR)
+        else:
+            match = self._current_speaker_index().identify(embedding, self.speaker_settings, location_id, seconds)
+        scores = ', '.join(f"{name} {score:.2f}" for name, score in sorted(match.scores.items(), key=lambda kv: -kv[1]))
+        logger.info(f"Speaker: {match.status} '{match.speaker}' (step '{match.step}', location '{location_id}', {seconds:.1f} s; {scores or 'no scores'}){' - ' + embed_error if embed_error else ''}")
+        if self.speaker_settings is not None:
+            self._save_field_clip(match, location_id, speech_audio, *client_field_clips)
+        return {
+            'speaker': match.speaker,
+            'speaker_score': round(match.score, 4),
+            'speaker_status': match.status,
+            'speaker_step': match.step
+        }
+
     def _bind_thread_to_gpu(self):
         """
         Pin the calling thread to the GPU this instance was configured for.
@@ -223,19 +400,28 @@ class AmadeoWhisperX:
         * detected_language - The detected language
         * language_confidence - The confidence score for the language (0 - 1)
         * average_word_confidence - The average word confidence score (0 - 1)
+        * speaker, speaker_score, speaker_status, speaker_step - only when the request sets 'voice_recognition'; see
+          _speaker_fields. The request's optional 'location_id' says which enrolled samples to compare first.
+
+        A second command, 'speaker_embedding', returns the voice embedding of the audio instead of a transcription
+        (used by scripts/ai/asr/speaker_id/enroll_voice.py to enroll a voice with exactly the server's model):
+        * embedding - the vector; model - the embedding model's id; seconds - the audio's length.
+        Its request may carry 'sample_rate' when the audio is not 16 kHz.
 
 
         Args:
             request: A dictionary that will contain fields. It should ALWAYS contain 'command', which represents WHAT the user wants to do. That will determine one of several scenarios:
                     Scenario 1: generating transcriptions
                         'command' = 'transcribe'
+                    Scenario 2: a voice embedding, for enrollment
+                        'command' = 'speaker_embedding'
             data: bytes - This will always be the audio from the client's microphone. Currently, its expected to be data that the Python library 'sounddevice' captures from a mic - a 16 bit signed integer, with values from -32,768 to 32,767 (in other words, raw PCM bytes)
 
         Returns:
             Tuple[dict, None] - The dictionary (that will be converted to JSON and sent to the client), None (Since this has to fit the format of what we may send to a client, that is (JSON, media_data) - and since this returns no media, its always None)
         """
         try:
-            possible_commands = ('transcribe')
+            possible_commands = ('transcribe', 'speaker_embedding')
             command = request.get('command', '')
             address = request.get('client_address', 'NO_ADDRESS')
             port = request.get('client_port', 'NO_PORT')
@@ -260,7 +446,9 @@ class AmadeoWhisperX:
             raise ValueError(f"Invalid JSON request: {e}")
 
         response = {}
-        if command == 'transcribe':
+        if command == 'speaker_embedding':
+            response = self._handle_speaker_embedding(request, data)
+        elif command == 'transcribe':
 
             logger.debug(f"{ColoredText.YELLOW_TEXT}[{sessionID}]{ColoredText.END_TEXT}{ColoredText.CYAN_TEXT} Processing job{ColoredText.END_TEXT}")
 
@@ -278,6 +466,17 @@ class AmadeoWhisperX:
                 audio_segment_np = np.frombuffer(data, dtype=np.int16).astype(np.float32) / AmadeoWhisperX.MAX_POSITIVE_INT16_VALUE_AS_FLOAT
 
                 audio_for_lang_detect = whisperx.audio.pad_or_trim(audio_segment_np)
+
+                # Voice recognition, if asked for: the speaker is worked out from the same audio, under the same GPU
+                # lock, and returned with the transcription. Too little speech is not embedded at all.
+                voice_recognition = bool(request.get('voice_recognition'))
+                location_id = request.get('location_id') if isinstance(request.get('location_id'), str) else ''
+                # Whether this client lets its microphone be recorded as field clips (the config must allow it too)
+                client_field_clips = (request.get('save_known_field_clips') is True, request.get('save_unknown_field_clips') is True)
+                # How much was actually said is only known once the words are aligned (see speech_span); until
+                # then, the whole chunk
+                seconds = len(audio_segment_np) / 16000.0
+                embedding, embed_error, speech_audio = None, '', None
 
                 # ------------------------------------------------------------------ GPU only work
                 # The lock is held for the model calls and nothing else. The models are shared
@@ -302,6 +501,19 @@ class AmadeoWhisperX:
 
                         if result and "segments" in result and result["segments"]:
                             aligned_result = whisperx.align(result["segments"], self.align_model, self.metadata, audio_segment_np, device=self.device)
+
+                        if voice_recognition and self.speaker_embedder is not None:
+                            # Only the speech is judged: its length against min_seconds, and its sound for the
+                            # embedding (the trailing silence would only dilute the voice)
+                            start, end, seconds = speech_span(aligned_result, seconds)
+                            if seconds >= self.speaker_settings.min_seconds:
+                                # A failed embedding must not cost the transcription: note it and carry on
+                                try:
+                                    speech_audio = audio_segment_np[int(start * 16000):int(end * 16000)]
+                                    embedding = self.speaker_embedder.embed(speech_audio)
+                                except Exception as e:
+                                    embed_error = f"speaker embedding failed: {e}"
+                                    logger.warning(embed_error)
 
                     finally:
                         # Release this request's VRAM before handing the lock on, so the next
@@ -332,6 +544,9 @@ class AmadeoWhisperX:
 
                     # The `full_text` from the loop above will have a trailing space.
                     full_text = full_text.strip()
+
+                speaker_fields = self._speaker_fields(voice_recognition, location_id, seconds, embedding, embed_error,
+                                                      speech_audio, client_field_clips) if full_text else {}
 
                 if full_text == "":
                     msg = f"Blank transcription generated."
@@ -364,7 +579,8 @@ class AmadeoWhisperX:
                         "detected_language": detected_language,
                         "language_confidence": language_confidence,
                         "average_word_confidence": average_word_confidence,
-                        'file_size': 0
+                        'file_size': 0,
+                        **speaker_fields
                     }
 
                     logger.info(f"Transcription completed and sent. Lang: {detected_language} ({language_confidence:.2f}), Avg Conf: {average_word_confidence:.2f}")
@@ -391,10 +607,111 @@ class AmadeoWhisperX:
         return response, None
 
 
+    def _handle_speaker_embedding(self, request: Dict[str, Any], data: bytes) -> Dict[str, Any]:
+        """
+        Handles the 'speaker_embedding' command: the voice embedding of a clip, for enrolling a voice.
+
+        :param request: The request; an optional 'sample_rate' (default 16000) says the rate of the audio.
+        :param data: The audio as raw 16 bit signed PCM, mono.
+        :return: The response dictionary: 'embedding', 'model' and 'seconds' on success.
+        """
+        if self.speaker_embedder is None:
+            return {'success': False, 'type': 'error', 'file_size': 0,
+                    'message': "Speaker identification is not configured on this ASR server (no 'speaker_id' block in its --json config)."}
+        sample_rate = request.get('sample_rate', 16000)
+        if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or not 8000 <= sample_rate <= 192000:
+            return {'success': False, 'type': 'error', 'file_size': 0, 'message': f"Invalid sample_rate {sample_rate!r}."}
+        if not data:
+            return {'success': False, 'type': 'error', 'file_size': 0, 'message': "No audio sent."}
+        try:
+            from amadeo_utils.ai.asr.speaker_embedder import resample
+            audio = np.frombuffer(data, dtype=np.int16).astype(np.float32) / AmadeoWhisperX.MAX_POSITIVE_INT16_VALUE_AS_FLOAT
+            audio = resample(audio, sample_rate)
+            with self.gpu_lock:
+                try:
+                    self._bind_thread_to_gpu()
+                    embedding = self.speaker_embedder.embed(audio)
+                finally:
+                    if self.use_cuda:
+                        torch.cuda.empty_cache()
+        except Exception as e:
+            logger.warning(f"Speaker embedding failed: {e}")
+            return {'success': False, 'type': 'error', 'file_size': 0, 'message': f"Speaker embedding failed: {e}"}
+        logger.info(f"Speaker embedding computed ({len(audio) / 16000.0:.1f} s of audio).")
+        return {'success': True, 'type': 'speaker_embedding', 'message': '', 'file_size': 0,
+                'embedding': embedding, 'model': self.speaker_embedder.model_name, 'seconds': len(audio) / 16000.0}
+
+
     ################################################################################################################### Parsing Arguments From Command Line ####################################################################################################################
 
+    @staticmethod
+    def load_json_config(filepath: str) -> dict:
+        """
+        Loads the WhisperX server's JSON config (--json). Every field is optional; the keys are the command line's
+        long names with dashes turned into underscores, plus an optional 'speaker_id' object that turns on speaker
+        identification. Example:
+
+            {
+                "host": "127.0.0.1",
+                "port": 65432,
+                "model": "large-v3",
+                "language_code": "en",
+                "gpu": 1,
+                "combined_confidence_cutoff": 1.0,
+                "speaker_id": {
+                    "profiles_dir": "/path/to/voice-profiles",
+                    "threshold": 0.50,
+                    "margin": 0.05,
+                    "min_seconds": 1.0,
+                    "locations": {"office": {"threshold": 0.55}}
+                },
+                "log_file": "/path/to/logs/asr-server.log"
+            }
+
+        Only the speaker_id object's type is checked here; its contents are checked (speaker_id.settings_from_dict)
+        when the server starts, so a bad speaker_id block stops the server rather than silently leaving recognition
+        off. A key this server does not know is logged as a warning and ignored - with a hint when it is a speaker_id
+        setting put at the top level; keys starting with '_' ("_comment") are notes and pass silently.
+
+        Args:
+            filepath (str): The path to the JSON file.
+
+        Returns:
+            dict: The recognised fields that are present in the file.
+
+        Raises:
+            FileNotFoundError: If the specified file does not exist.
+            json.JSONDecodeError: If the file content is not valid JSON.
+            TypeError: If the file is not a JSON object, or a field's value is not of the expected type.
+        """
+        optional_fields = AmadeoWhisperX.SERVER_CONFIG_FIELDS
+
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Error: The file '{filepath}' was not found.")
+
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise TypeError(f"Error: '{filepath}' must hold a JSON object.")
+
+        scraped_data = {}
+        for field, expected_type in optional_fields.items():
+            if field in data:
+                value = data[field]
+                # bool is a subclass of int in Python, so rule it out explicitly for the numeric fields
+                if isinstance(value, bool) or not isinstance(value, expected_type):
+                    raise TypeError(f"Error: Field '{field}' in '{filepath}' has unexpected type '{type(value).__name__}'.")
+                scraped_data[field] = value
+
+        # A typo, or a setting at the wrong level, would otherwise be ignored without a word
+        for key in speaker_id.unknown_settings(data, optional_fields):
+            hint = " - it belongs inside the 'speaker_id' block" if key in speaker_id.SPEAKER_ID_KEYS else ''
+            logger.warning(f"Unknown setting '{key}' in {filepath} ignored{hint}.")
+
+        return scraped_data
+
     """
-    Gets args dictionary for a generic WhisperX server  
+    Gets args dictionary for a generic WhisperX server
     """
     @staticmethod
     def get_args_dict_server() -> dict:
@@ -406,20 +723,50 @@ class AmadeoWhisperX:
         parser.add_argument("-l", "--language_code", default=AmadeoWhisperX.LANGUAGE_CODE,help="The default language code.")
         parser.add_argument("-g", "--gpu", type=int, default=AmadeoWhisperX.GPU_INDEX,help="The index of the CUDA GPU to load the models onto, matching the order 'nvidia-smi -L' reports (0 for the first GPU, 1 for the second, and so on); the ordering is pinned to the physical slot order via CUDA_DEVICE_ORDER, so it does not depend on which card CUDA considers fastest. Defaults to the first GPU. Ignored if no CUDA device is available.")
         parser.add_argument("-ccc", "--combined_confidence_cutoff", type=float, default=AmadeoWhisperX.COMBINED_CONFIDENCE_CUTOFF,help="Each transcription has a confidence score (0-1) for the language and then an average confidence score for the words; if both of these numbers, summed, are less than this, the transcription will not be sent back to the client (as it is probably a false reading).")
+        parser.add_argument("--json", type=str, default="", help="If this points to a valid JSON file, the ENTIRE parameter settings are pulled from that file, and the defaults - and other arguments passed from the command line - are ignored. If the JSON load fails for whatever reason, though, the defaults WILL be engaged. Just remember that if there is a dash in the arg name, its going to be an underscore in the JSON. Speaker identification can only be turned on here, with a 'speaker_id' object (see load_json_config): it points at the voice profiles, which are biometric data, so keep the file out of the repository. The Hugging Face token for the embedding model is read from HF_TOKEN.")
 
         argDict = {}
 
         try:
             args = parser.parse_args()
+            use_default_arg_config = True  # This is only flipped if we successfully load from a JSON file
 
-            argDict['host'] = args.host
-            argDict['port'] = args.port
-            argDict['model'] = args.model
-            argDict['language_code'] = args.language_code
-            argDict['gpu'] = args.gpu
-            argDict['combined_confidence_cutoff'] = args.combined_confidence_cutoff
+            json_config_file = args.json
 
-            logger.debug(f"{ColoredText.BLUE_TEXT}WhisperXUtils.get_args_dict_server: Config loaded; host: {argDict['host']} port: {argDict['port']} model: {argDict['model']} gpu: {argDict['gpu']}.{ColoredText.END_TEXT}")
+            if json_config_file and os.path.exists(json_config_file):
+                try:
+                    config_dict = AmadeoWhisperX.load_json_config(json_config_file)
+
+                    argDict['host'] = config_dict.get('host', AmadeoWhisperX.HOST)
+                    argDict['port'] = config_dict.get('port', AmadeoWhisperX.PORT)
+                    argDict['model'] = config_dict.get('model', AmadeoWhisperX.WHISPER_MODEL_NAME)
+                    argDict['language_code'] = config_dict.get('language_code', AmadeoWhisperX.LANGUAGE_CODE)
+                    argDict['gpu'] = config_dict.get('gpu', AmadeoWhisperX.GPU_INDEX)
+                    argDict['combined_confidence_cutoff'] = config_dict.get('combined_confidence_cutoff', AmadeoWhisperX.COMBINED_CONFIDENCE_CUTOFF)
+                    argDict['speaker_id'] = config_dict.get('speaker_id')
+                    argDict['log_file'] = config_dict.get('log_file', '')
+
+                    logger.info(f"Config loaded from JSON {json_config_file}.")
+
+                    use_default_arg_config = False
+
+                except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError) as e:
+                    logger.warning(f"Could not load JSON config [{json_config_file}] - there are errors. Will attempt to load other defaults or args. Error: {e}.")
+
+            elif json_config_file:
+                logger.warning(f"Could not load JSON config [{json_config_file}] - file does not exist. Loading from defaults or other parameters sent.")
+
+            if use_default_arg_config:
+                argDict['host'] = args.host
+                argDict['port'] = args.port
+                argDict['model'] = args.model
+                argDict['language_code'] = args.language_code
+                argDict['gpu'] = args.gpu
+                argDict['combined_confidence_cutoff'] = args.combined_confidence_cutoff
+                argDict['speaker_id'] = None    # speaker identification is only configured through --json
+                argDict['log_file'] = ''        # so is the log file: screen only
+
+            logger.debug(f"{ColoredText.BLUE_TEXT}WhisperXUtils.get_args_dict_server: Config loaded; host: {argDict['host']} port: {argDict['port']} model: {argDict['model']} gpu: {argDict['gpu']} speaker ID: {'on' if argDict['speaker_id'] else 'off'}.{ColoredText.END_TEXT}")
 
         except SystemExit as e:
             argDict = {}

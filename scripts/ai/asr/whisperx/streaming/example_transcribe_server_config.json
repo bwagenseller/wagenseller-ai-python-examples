@@ -1,0 +1,25 @@
+{
+    "_comment": "Example config for transcribe_server.py --json. Every field is optional; missing ones take the command-line defaults. 'speaker_id' turns on speaker identification - leave it out to run without. It points at voice profiles, which are biometric data, so keep your real copy with your private configs and never in the repository. In 'speaker_id', only profiles_dir is required; samples_dir is only read by enroll_voice.py --all (<samples_dir>/<person>/<location_id>/*.wav); the rest are the defaults, and 'locations' overrides threshold / margin for one client location_id. The field_* settings let the server save the speech it judges (only from clients that opt in with their own save_known_field_clips / save_unknown_field_clips) (known and/or unrecognized voices) under field_samples_dir/<location>/<person or 'unrecognized'>/, for reviewing and enrolling by hand; clips older than field_retention_days (0 = never) are deleted. The Hugging Face token for the embedding model is read from the HF_TOKEN environment variable. log_file (optional) also writes the log to that file - one a day, 90 days kept; leave it out for screen only.",
+    "host": "127.0.0.1",
+    "port": 65432,
+    "model": "large-v3",
+    "language_code": "en",
+    "gpu": 0,
+    "combined_confidence_cutoff": 1.0,
+    "speaker_id": {
+        "profiles_dir": "/path/to/private/configs/voice-profiles",
+        "samples_dir": "/path/to/private/configs/voice-samples",
+        "embedding_model": "pyannote/wespeaker-voxceleb-resnet34-LM",
+        "threshold": 0.50,
+        "margin": 0.05,
+        "min_seconds": 1.0,
+        "locations": {
+            "office": {"threshold": 0.55}
+        },
+        "field_samples_dir": "/path/to/private/configs/field-samples",
+        "save_known_field_clips": false,
+        "save_unknown_field_clips": false,
+        "field_retention_days": 90
+    },
+    "log_file": "/path/to/logs/asr-server.log"
+}

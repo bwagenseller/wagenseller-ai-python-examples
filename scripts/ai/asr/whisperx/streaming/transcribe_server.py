@@ -1,6 +1,7 @@
 import logging
 from amadeo_utils.server.amadeo_server import AmadeoServer
 from amadeo_utils.ai.asr.whisperx import AmadeoWhisperX
+from amadeo_utils.logging_utils import add_log_file
 """
 How the Server Works
 Global Setup: The script starts by importing necessary libraries and setting up global variables for configuration, a queue.Queue for handling transcription jobs, and a threading.Lock to manage GPU access. The WhisperX model is loaded once at startup. ⚙️
@@ -53,5 +54,7 @@ class WhisperXServer:
 if __name__ == "__main__":
 
     argsDict = AmadeoWhisperX.get_args_dict_server()
+    # The log goes to the screen, and also to 'log_file' if the config names one (see amadeo_utils.logging_utils)
+    add_log_file(argsDict.get('log_file'))
     server = WhisperXServer(argsDict)
     server.server.start_server()

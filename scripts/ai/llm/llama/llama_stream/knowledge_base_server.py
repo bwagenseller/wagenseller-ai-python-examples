@@ -1,5 +1,6 @@
 import logging
 from amadeo_utils.server.amadeo_server import AmadeoServer
+from amadeo_utils.logging_utils import add_log_file
 from amadeo_utils.ai.llm.llama.KnowledgeBaseStream import KnowledgeBaseStream
 
 # Configure logging to show timestamps and log levels
@@ -26,5 +27,7 @@ class KnowledgeBaseServer:
 if __name__ == "__main__":
 
     argsDict = KnowledgeBaseStream.get_args_dict()
+    # The log goes to the screen, and also to 'log_file' if the config names one (see amadeo_utils.logging_utils)
+    add_log_file(argsDict.get('log_file'))
     server = KnowledgeBaseServer(argsDict)
     server.server.start_server()

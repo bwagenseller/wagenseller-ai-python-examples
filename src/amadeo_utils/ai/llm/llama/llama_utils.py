@@ -857,6 +857,8 @@ class LlamaUtils:
                     argDict['encrypted'] = config_dict.get('encrypted', False)
                     # Passed to AmadeoServer by role_play_server.py; 0 = never close an idle client.
                     argDict['client_idle_timeout_seconds'] = LlamaUtils.resolve_idle_timeout(config_dict.get('client_idle_timeout_seconds', LlamaUtils.CLIENT_IDLE_TIMEOUT_SECONDS))
+                    # Read by role_play_server.py (amadeo_utils.logging_utils.add_log_file); '' = screen only
+                    argDict['log_file'] = config_dict.get('log_file') or ''
 
                     # Optional so that a config written before GPU selection existed still loads. These fall back to
                     # the CLASS CONSTANTS, not to the command line: once this JSON loads it owns every setting, exactly
@@ -977,6 +979,7 @@ class LlamaUtils:
         'reasoning_budget_tokens': object,
         'suppressed_reasoning_tokens': object,
         'client_idle_timeout_seconds': object,     # validated by resolve_idle_timeout, like the token settings
+        'log_file': str,    # also log to this file (see amadeo_utils.logging_utils); missing = screen only
     }
 
     @staticmethod
@@ -1037,6 +1040,8 @@ class LlamaUtils:
             'suppressed_reasoning_tokens': LlamaUtils.resolve_token_count(config_dict.get('suppressed_reasoning_tokens', LlamaUtils.SUPPRESSED_REASONING_TOKENS), 'suppressed_reasoning_tokens'),
             # Passed to AmadeoServer by the server scripts; 0 = never close an idle client.
             'client_idle_timeout_seconds': LlamaUtils.resolve_idle_timeout(config_dict.get('client_idle_timeout_seconds', LlamaUtils.CLIENT_IDLE_TIMEOUT_SECONDS)),
+            # Read by the server scripts (amadeo_utils.logging_utils.add_log_file); '' = screen only
+            'log_file': config_dict.get('log_file') or '',
         }
 
     @staticmethod
@@ -1465,7 +1470,8 @@ class LlamaUtils:
             'response_token_presets': object,
             'reasoning_budget_tokens': object,
             'suppressed_reasoning_tokens': object,
-            'client_idle_timeout_seconds': object     # validated by resolve_idle_timeout
+            'client_idle_timeout_seconds': object,    # validated by resolve_idle_timeout
+            'log_file': str     # also log to this file (see amadeo_utils.logging_utils); missing = screen only
         }
 
         return LlamaUtils.scrape_json_config(filepath, required_fields, optional_fields)

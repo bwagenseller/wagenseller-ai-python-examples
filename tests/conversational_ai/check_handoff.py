@@ -18,7 +18,7 @@ What it proves (amadeo_utils.ai.combined.conversational_ai.handoff)
    default speaker, then 'The user', if the turn has none), quotes both sides, uses only the most recent max_turns,
    and is '' when nothing was missed or notes are off (max_turns 0). '##' in quotes can't hide part of it.
 3. shorten: long text is cut at a word boundary with '...', and whitespace is collapsed.
-4. speaker_tag / clean_name: '[Brent, to Santa]: ', '[Brent]: ' with no addressee, '' with no speaker; brackets and
+4. speaker_tag / clean_name: '[Kevin, to Santa]: ', '[Kevin]: ' with no addressee, '' with no speaker; brackets and
    '##' in a name are removed.
 
 Usage:  python check_handoff.py      (any Python 3 with the repo's src on the path)
@@ -67,22 +67,22 @@ check("malformed turns are skipped",
 
 # 2. build_handoff_note
 check("Frasier is told what Rose said, and by whom",
-      build_handoff_note([T1], 'crane', NAMES, default_speaker='Alex'),
-      '(Since you last spoke: Alex said to Rose: "Should I repaint the deck?" Rose replied: "Yes, before the first frost.")\n')
+      build_handoff_note([T1], 'crane', NAMES, default_speaker='Kevin'),
+      '(Since you last spoke: Kevin said to Rose: "Should I repaint the deck?" Rose replied: "Yes, before the first frost.")\n')
 check("several turns are joined in order",
-      build_handoff_note([T1, T2], 'crane', NAMES, default_speaker='Alex'),
-      '(Since you last spoke: Alex said to Rose: "Should I repaint the deck?" Rose replied: "Yes, before the first frost."'
-      ' Then Alex said to Rose: "What colour?" Rose replied: "Grey would suit the house.")\n')
+      build_handoff_note([T1, T2], 'crane', NAMES, default_speaker='Kevin'),
+      '(Since you last spoke: Kevin said to Rose: "Should I repaint the deck?" Rose replied: "Yes, before the first frost."'
+      ' Then Kevin said to Rose: "What colour?" Rose replied: "Grey would suit the house.")\n')
 check("Rose is told what Frasier (by display name) said",
-      build_handoff_note([T1, T3], 'rose', NAMES, default_speaker='Alex'),
-      '(Since you last spoke: Alex said to Frasier: "Hey Frasier, what do you think?" Frasier replied: "Grey? How pedestrian.")\n')
+      build_handoff_note([T1, T3], 'rose', NAMES, default_speaker='Kevin'),
+      '(Since you last spoke: Kevin said to Frasier: "Hey Frasier, what do you think?" Frasier replied: "Grey? How pedestrian.")\n')
 check("a turn's own speaker wins over the default",
-      'Sam said to Rose:' in build_handoff_note([dict(T1, speaker='Sam')], 'crane', NAMES, default_speaker='Alex'), True)
+      'Sam said to Rose:' in build_handoff_note([dict(T1, speaker='Sam')], 'crane', NAMES, default_speaker='Kevin'), True)
 check("no speaker anywhere: 'The user'", 'The user said to Rose:' in build_handoff_note([T1], 'crane', NAMES), True)
 check("a non-string speaker falls back to the default",
-      'Alex said to Rose:' in build_handoff_note([dict(T1, speaker=7)], 'crane', NAMES, default_speaker='Alex'), True)
+      'Kevin said to Rose:' in build_handoff_note([dict(T1, speaker=7)], 'crane', NAMES, default_speaker='Kevin'), True)
 check("the note never says 'I' (the agent must not guess who 'I' is)",
-      ' I said' in build_handoff_note([T1, T3], 'rose', NAMES, default_speaker='Alex'), False)
+      ' I said' in build_handoff_note([T1, T3], 'rose', NAMES, default_speaker='Kevin'), False)
 check("no note when the agent missed nothing", build_handoff_note([T1, T2], 'rose', NAMES), '')
 check("only the most recent max_turns",
       build_handoff_note([T1, T2], 'crane', NAMES, max_turns=1).count(' said to '), 1)
@@ -104,11 +104,11 @@ check("max_chars 0 means no limit", shorten("x " * 1000, 0), ("x " * 1000).strip
 check("one long word is still cut", shorten("a" * 20, 5), "aaaaa...")
 
 # 4. speaker_tag / clean_name
-check("speaker and addressee", speaker_tag('Brent', 'Santa'), '[Brent, to Santa]: ')
-check("no addressee (one agent)", speaker_tag('Brent'), '[Brent]: ')
+check("speaker and addressee", speaker_tag('Kevin', 'Santa'), '[Kevin, to Santa]: ')
+check("no addressee (one agent)", speaker_tag('Kevin'), '[Kevin]: ')
 check("no speaker: no tag", speaker_tag('', 'Santa'), '')
 check("None speaker: no tag", speaker_tag(None, 'Santa'), '')
-check("brackets and '##' are taken out of names", speaker_tag('[Br##ent]', 'Sa]nta'), '[Brent, to Santa]: ')
+check("brackets and '##' are taken out of names", speaker_tag('[Kev##in]', 'Sa]nta'), '[Kevin, to Santa]: ')
 check("clean_name collapses whitespace", clean_name('  Mary \n Ann '), 'Mary Ann')
 
 print(f"\n{len(failures)} failure(s)")

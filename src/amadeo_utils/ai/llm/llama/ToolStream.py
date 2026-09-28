@@ -150,7 +150,7 @@ class ToolStream(StreamBase):
     # Appended to the configured system message. Always supplied, never replaces it - see AGENTS.md on
     # Muse-Glimmer's hardcoded default persona, which appears only when no system message is given.
     # The one sentence the main model is asked to write after a delegate (see POINTER_ONLY below). One fixed sentence,
-    # not "briefly tell the user": under a character prompt every model dressed a free-form pointer up - "..., Brent.",
+    # not "briefly tell the user": under a character prompt every model dressed a free-form pointer up - "..., Kevin.",
     # "I have consulted the digital currents for you..." - past the filter and into speech (live, 2026-09-26).
     DELEGATE_POINTER = "The answer is shown above."
     # What replaces a pointer when nothing was shown this turn: after a worker that found nothing, Qwen 3.6 still wrote
@@ -177,7 +177,7 @@ class ToolStream(StreamBase):
     # The WHOLE reply must be one such sentence ("... are shown above.", "See the answer above."): a reply that adds
     # anything ("As shown above, stay indoors tonight.", "...shown above. Want the radar too?") is kept.
     # The pointer may be addressed to the user ("...has been provided to you above.") and may open with the model
-    # saying it cannot see the answer itself ("I cannot see the trending topics myself, Brent, but the answer has
+    # saying it cannot see the answer itself ("I cannot see the trending topics myself, Kevin, but the answer has
     # been provided to you above." - Gemma 4, live 2026-09-26); the quarantine is working as designed there, and the
     # whole sentence is noise under the answer it points at.
     POINTER_ONLY = re.compile(r"\(?\s*(?:[^.!?]*\b(?:is|are|was|were|has been|have been|['\u2019]s)\s+(?:shown|provided|"
@@ -892,7 +892,7 @@ class ToolStream(StreamBase):
         Args:
             answer: The main model's reply.
             player_name: The session's player_name, if any. A persona prompt makes models address the user by name
-                ("Brent, the answer is shown above." / "...shown above, Brent."), so that name is removed first when
+                ("Kevin, the answer is shown above." / "...shown above, Kevin."), so that name is removed first when
                 it opens or closes the reply - only there, and only that exact name.
         """
         text = (answer or "").strip()

@@ -18,7 +18,8 @@ What it proves (amadeo_utils.ai.combined.conversational_ai.wake_words)
    the active agent; an always-listening agent gets what is left; otherwise nobody. Blank speech never wakes anyone
    and is never a continuation.
 6. build_agents: agent_defaults are merged under each agent; the old single-agent config becomes one always-listening
-   agent; bad configs (duplicate names, a wake word on two agents, wrong types, empty agents) are refused.
+   agent; bad configs (duplicate names, a wake word on two agents, wrong types, empty agents) are refused;
+   allow_unknown_speakers / allowed_speakers default to true / empty and must be a boolean / a list of names.
 7. Several agents in play (named, plus the active agent mid-conversation): one clearly spoken to by punctuation
    ("Rick, ...", "Hey Rick ...", "..., Rick?") answers with no LLM call; otherwise 'ambiguous' with the candidates.
 
@@ -152,6 +153,20 @@ check("display_name can be set per agent",
       build_agents({'agents': [{'name': 'crane', 'display_name': 'Frasier'}]}, FALLBACK)[0]['display_name'], 'Frasier')
 check("agent_defaults cannot set a display_name",
       build_agents({'agent_defaults': {'display_name': 'Z'}, 'agents': [{'name': 'a'}]}, FALLBACK)[0]['display_name'], 'A')
+check("allow_unknown_speakers defaults to true, and can be set per agent or in agent_defaults",
+      [a['allow_unknown_speakers'] for a in build_agents({'agent_defaults': {'allow_unknown_speakers': False},
+                                                          'agents': [{'name': 'a'}, {'name': 'b', 'allow_unknown_speakers': True}]}, FALLBACK)]
+      + [rose['allow_unknown_speakers']], [False, True, True])
+raises("allow_unknown_speakers must be a boolean", TypeError,
+       lambda: build_agents({'agents': [{'name': 'a', 'allow_unknown_speakers': 'no'}]}, FALLBACK))
+check("allowed_speakers defaults to empty, and can be set per agent or in agent_defaults",
+      [a['allowed_speakers'] for a in build_agents({'agent_defaults': {'allowed_speakers': ['Sam']},
+                                                    'agents': [{'name': 'a'}, {'name': 'b', 'allowed_speakers': ['Kim', 'Kevin']}]}, FALLBACK)]
+      + [rose['allowed_speakers']], [['Sam'], ['Kim', 'Kevin'], []])
+raises("allowed_speakers must be a list", TypeError,
+       lambda: build_agents({'agents': [{'name': 'a', 'allowed_speakers': 'Sam'}]}, FALLBACK))
+raises("allowed_speakers must hold non-empty names", ValueError,
+       lambda: build_agents({'agents': [{'name': 'a', 'allowed_speakers': ['Sam', ' ']}]}, FALLBACK))
 check("agent_defaults cannot set a name", build_agents({'agent_defaults': {'name': 'z'}, 'agents': [{'name': 'a'}]}, FALLBACK)[0]['name'], 'a')
 
 raises("empty agents list refused", ValueError, lambda: build_agents({'agents': []}, FALLBACK))

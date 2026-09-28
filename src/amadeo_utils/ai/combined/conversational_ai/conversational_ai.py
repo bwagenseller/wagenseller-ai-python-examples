@@ -12,12 +12,34 @@ from amadeo_utils.server.session_worker import SessionWorker
 from amadeo_utils.ai.combined.conversational_ai.wake_words import select_agent, WAKE_WORD_MAX_POSITION
 from amadeo_utils.ai.combined.conversational_ai.handoff import build_handoff_note, speaker_tag, HANDOFF_MAX_TURNS, HANDOFF_MAX_CHARS, HIDDEN_DELIMITER
 from amadeo_utils.ai.combined.conversational_ai.routing import build_routing_prompt, parse_routing_reply, display_name, ROUTING_MAX_TOKENS
+from amadeo_utils.ai.combined.conversational_ai.speakers import resolve_speaker, refuses_unknown_speaker, refuses_unlisted_speaker, HOUSEHOLD_NAME
+from amadeo_utils.ai.asr.speaker_id import UNRECOGNIZED_SPEAKER
 
 # Configure logging to show timestamps and log levels
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
 logger = logging.getLogger(__name__)
 
 VALID_PIPELINES = ['reflection', 'translate_text', 'translate_voice', 'revoice', 'basic_conversational']
+
+
+class SharedLlmSession:
+    """
+    One LLM session (a persistent connection to the LLM server, holding one agent's chat history) and the client
+    sessions using it. See ConversationalAiServer.llm_sessions.
+    """
+
+    def __init__(self, client, lock, settings):
+        """
+        Args:
+            client: the AmadeoClient holding the persistent LLM connection.
+            lock: taken for each request, so requests from different clients take turns.
+            settings: what the session was created with (player_name, continuous_save, load_previous), to warn a
+                later client whose own settings differ.
+        """
+        self.client = client
+        self.lock = lock
+        self.settings = settings
+        self.client_sessions = set()    # this server's sessionIDs of the clients using it
 
 class ConversationalAiServer:
 
@@ -45,11 +67,18 @@ class ConversationalAiServer:
         self.session_to_asr_client_map = {}  # Simple dictionary that maps sessionIDs to a tuple (asr clients, asr client locks); asr clients use a persistent connection, so we keep that connection for the whole session
         self.session_to_asr_client_lock = threading.Lock() # use this lock to interact with the asr client as well
 
-        # Maps (sessionID, agent name) to a tuple (llm client, llm client lock). Each agent gets its own persistent LLM
-        # connection for the whole session, because the LLM server fixes the system prompt when the session is created -
-        # one shared connection would keep answering as whichever agent spoke first.
-        self.session_to_llm_client_map = {}
-        self.session_to_llm_client_lock = threading.Lock() # use this lock to interact with the llm client as well
+        # Maps (user_id, system_prompt_id) to a SharedLlmSession: one persistent LLM connection, and so one LLM session
+        # and one chat history, for everyone talking to that agent under that user_id - whichever client (Pi) they
+        # are at. Keyed like this because:
+        #  * the LLM server fixes the system prompt when a session is created, so each agent (prompt) needs its own
+        #    session - one shared connection would keep answering as whichever agent spoke first; and
+        #  * the LLM server saves a session's history to <user_id>/<system_prompt_id> by rewriting the whole file from
+        #    that session's copy in memory, which it loads only once. Two sessions on the same file would each
+        #    overwrite the other's turns (last save wins) and never hear what the other was told. One shared session
+        #    means one copy and one writer, and every client hears the whole household's conversation with the agent.
+        # Requests to a shared session take turns on its lock.
+        self.llm_sessions = {}
+        self.llm_sessions_lock = threading.Lock()  # guards self.llm_sessions (each session has its own lock for requests)
 
         # Register global handlers for all sessions
         SessionWorker.register_global_handler('ping', self._handle_ping)
@@ -62,6 +91,8 @@ class ConversationalAiServer:
         self.llm_host = argsDict['llm_host']
         self.llm_port = argsDict['llm_port']
         self.llm_response_timeout = argsDict.get('llm_response_timeout_seconds', ConversationalAiServer.LLM_RESPONSE_TIMEOUT_SECONDS)
+        # What '@@NAME@@' in a system prompt becomes when voice recognition is on (see speakers.HOUSEHOLD_NAME)
+        self.household_name = argsDict.get('household_name', HOUSEHOLD_NAME)
 
         self.server = AmadeoServer(argsDict['host'], argsDict['port'],
                                  synchronous=False,
@@ -122,9 +153,18 @@ class ConversationalAiServer:
             worker.save_in_backpack('user_id', request.get('user_id'))
             worker.save_in_backpack('player_name', request.get('player_name', ''))
             # Who is talking this turn, for the speaker tag and handoff notes (see handoff.py). The client sends its
-            # player_name for now; voice recognition will fill this in later. An older client sends nothing, and
-            # player_name stands in.
+            # player_name; with voice recognition on, the ASR stage replaces it with the voice it recognized (see
+            # speakers.py). An older client sends nothing, and player_name stands in.
             worker.save_in_backpack('speaker', request.get('speaker') or request.get('player_name') or '')
+            # Voice recognition (CS-23): the ASR server works out the speaker from the audio, comparing the samples
+            # enrolled at this client's location first. The client's speaker above is used only when it is off.
+            worker.save_in_backpack('voice_recognition', request.get('voice_recognition') is True)
+            location_id = request.get('location_id')
+            worker.save_in_backpack('location_id', location_id if isinstance(location_id, str) else '')
+            # Whether this client lets its microphone be recorded as field clips (known / unrecognized voices); the ASR
+            # server's own config must allow it too. Off unless the client says a real true.
+            worker.save_in_backpack('save_known_field_clips', request.get('save_known_field_clips') is True)
+            worker.save_in_backpack('save_unknown_field_clips', request.get('save_unknown_field_clips') is True)
 
             # Every agent the client knows about. The ASR stage picks one of them (or none) once it has the
             # transcript, and cuts this list down to that one agent before the LLM stage.
@@ -207,49 +247,58 @@ class ConversationalAiServer:
 
     def _get_or_create_llm_client(self, session_id:str, request_id:str, agent_name:str, user_id:str, player_name:str, system_prompt_id:str, continuous_save:bool = False, load_previous:bool = False):
         """
-        Finds the llm client for this session and agent, creating it (and its LLM session) on first use.
+        Finds the LLM session shared by everyone talking to this agent under this user_id, creating it on first use,
+        and records that this client session uses it (see self.llm_sessions for why sessions are shared).
+
+        The settings below are sent to the LLM server only when the session is created, and are fixed from then on:
+        a later client whose settings differ (e.g. another player_name) joins the existing session, with a warning.
 
         Args:
             session_id: this server's session ID for the client.
             request_id: the request that needs the LLM.
-            agent_name: the agent answering; each agent in a session has its own LLM connection and chat history.
-            user_id, player_name, system_prompt_id, continuous_save, load_previous: sent to the LLM server when the
-                session is created (only then - they are fixed for the life of the LLM session).
+            agent_name: the agent answering (names the LLM session and appears in the logs).
+            user_id, system_prompt_id: which shared session - the pair the LLM server keeps the history under.
+            player_name, continuous_save, load_previous: sent to the LLM server when the session is created.
 
         Returns:
-            (llm client, its lock)
+            (llm client, its lock) - hold the lock for each request.
         """
-        key = (session_id, agent_name)
-        with self.session_to_llm_client_lock:
-            if key not in self.session_to_llm_client_map:
-                logger.info(f"{ColoredText.BLUE_TEXT}Creating a LLM client for sessionID {session_id}, agent '{agent_name}', to LLM host {self.llm_host} and LLM port {self.llm_port}.{ColoredText.END_TEXT}")
-                # The LLM server refuses a sessionID that is already in use, so each agent asks for its own
+        key = (user_id, system_prompt_id)
+        settings = {'player_name': player_name, 'continuous_save': continuous_save, 'load_previous': load_previous}
+        with self.llm_sessions_lock:
+            shared = self.llm_sessions.get(key)
+            if shared is None:
+                logger.info(f"{ColoredText.BLUE_TEXT}Creating the shared LLM session for user '{user_id}', prompt '{system_prompt_id}' (agent '{agent_name}', first used by sessionID {session_id}), to LLM host {self.llm_host} and LLM port {self.llm_port}.{ColoredText.END_TEXT}")
+                # The LLM server refuses a sessionID that is already in use, so the session is named after the client
+                # session that created it and the agent - unique for as long as it lives
                 llm_client = AmadeoClient( self.llm_host, self.llm_port, additional_server_response_functionality=self.handle_llm_server_response, session_id = f"{session_id}-{agent_name}", request_id = request_id, persistent_request_timeout=self.llm_response_timeout)
 
-
-                llm_client_lock = threading.Lock() # use this lock to interact with the asr client as well
-
                 if not llm_client.establish_persistent_connection():
+                    # Not kept: the next request tries again, rather than every client of this user being stuck with
+                    # a dead connection
                     logger.error(f"{ColoredText.RED_TEXT}Failed to establish LLM connection for worker with sessionID {session_id}!{ColoredText.END_TEXT}")
-                else:
+                    return llm_client, threading.Lock()
 
-                    # Send using the persistent request method
-                    # the first request to the LLM must establish some parameters
-                    response, raw_data = llm_client.send_persistent_request(
-                        command="create_llm_session",
-                        message="Request to LLM",
-                        binary_data=None,
-                        user_id=user_id,
-                        player_name=player_name,
-                        system_prompt_id=system_prompt_id,
-                        spoken_response=True,
-                        continuous_save=continuous_save,
-                        load_previous=load_previous
-                    )
+                # Send using the persistent request method
+                # the first request to the LLM must establish some parameters
+                response, raw_data = llm_client.send_persistent_request(
+                    command="create_llm_session",
+                    message="Request to LLM",
+                    binary_data=None,
+                    user_id=user_id,
+                    player_name=player_name,
+                    system_prompt_id=system_prompt_id,
+                    spoken_response=True,
+                    continuous_save=continuous_save,
+                    load_previous=load_previous
+                )
 
-                self.session_to_llm_client_map[key] = (llm_client, llm_client_lock)
-            llm_client, llm_client_lock = self.session_to_llm_client_map[key]
-            return llm_client, llm_client_lock
+                shared = SharedLlmSession(llm_client, threading.Lock(), settings)
+                self.llm_sessions[key] = shared
+            elif session_id not in shared.client_sessions and settings != shared.settings:
+                logger.warning(f"{ColoredText.YELLOW_TEXT}sessionID {session_id} joins the shared LLM session for user '{user_id}', prompt '{system_prompt_id}', which was created with {shared.settings}; its own {settings} are not used.{ColoredText.END_TEXT}")
+            shared.client_sessions.add(session_id)
+            return shared.client, shared.lock
 
 
     def _get_or_create_asr_client(self, session_id):
@@ -295,17 +344,23 @@ class ConversationalAiServer:
 
     def remove_llm_clients(self, session_id):
         """
-        Closes and forgets every LLM client for a session (one per agent that was spoken to).
+        This client session no longer needs its LLM sessions: forget it on each shared session it used, and close
+        the ones no other client is still using.
 
         Args:
             session_id: the session whose LLM connections are no longer needed.
         """
-        with self.session_to_llm_client_lock:
-            keys = [key for key in self.session_to_llm_client_map if key[0] == session_id]
-            entries = [(key[1], self.session_to_llm_client_map.pop(key)) for key in keys]
-        for agent_name, (llm_client, _) in entries:
-            llm_client.close_connection()
-            logger.info(f"{ColoredText.BLUE_TEXT}Shut down and removed LLM client for session {session_id}, agent '{agent_name}'.{ColoredText.END_TEXT}")
+        with self.llm_sessions_lock:
+            closing = []
+            for key, shared in list(self.llm_sessions.items()):
+                shared.client_sessions.discard(session_id)
+                if not shared.client_sessions:
+                    closing.append((key, self.llm_sessions.pop(key)))
+        for (user_id, system_prompt_id), shared in closing:
+            # Wait for a request still under way on it (a reply being generated) before closing the connection
+            with shared.lock:
+                shared.client.close_connection()
+            logger.info(f"{ColoredText.BLUE_TEXT}Shut down and removed the LLM session for user '{user_id}', prompt '{system_prompt_id}' (its last client, session {session_id}, left).{ColoredText.END_TEXT}")
 
     def _route_with_llm(self, session_id, request_id, transcript, candidates, last_speaker):
         """
@@ -408,12 +463,20 @@ class ConversationalAiServer:
             # we re-use self.session_to_asr_client_lock for the asr_client too
 
             asr_client.update_request_id(request_id)
+            # Voice recognition happens in the ASR server, in the same pass as the transcription, so it is asked for
+            # here (only the conversational pipeline sets it)
+            speaker_fields = {}
+            if worker.get_from_backpack('voice_recognition'):
+                speaker_fields = {'voice_recognition': True, 'location_id': worker.get_from_backpack('location_id') or '',
+                                  'save_known_field_clips': bool(worker.get_from_backpack('save_known_field_clips')),
+                                  'save_unknown_field_clips': bool(worker.get_from_backpack('save_unknown_field_clips'))}
             # Send using the new persistent request method with binary audio data
             # this already includes sessionID and requestID
             response, raw_data = asr_client.send_persistent_request(
                 command="transcribe",
                 message="Audio chunk for transcription",
-                binary_data=speech_segment_bytes # Send as binary data after JSON
+                binary_data=speech_segment_bytes, # Send as binary data after JSON
+                **speaker_fields
             )
 
         logger.info(f"{ColoredText.BLUE_TEXT}Worker for sessionID {session_id} amd requestID {request_id} sent transcription to ASR.{ColoredText.END_TEXT}")
@@ -437,7 +500,7 @@ class ConversationalAiServer:
         request_id = job['requestID']
         llm_client, llm_client_lock = self._get_or_create_llm_client(session_id, request_id, job.get('agent_name', 'default'), job.get('user_id', 'Bob'), job.get('player_name', ''), job.get('system_prompt_id', 'default'), job.get('continuous_save', False), job.get('load_previous', False))
         with llm_client_lock:
-            # we re-use self.session_to_llm_client_lock for the llm_client too
+            # the shared session's own lock: requests from different clients take turns
 
             llm_client.update_request_id(request_id)
 
@@ -634,12 +697,65 @@ class ConversationalAiServer:
                 worker.shutdown()
                 return
 
+            # Who is talking. With voice recognition on, this is the voice the ASR server recognized (or an
+            # unrecognized voice) in place of the client's player_name; everything below - the tag, the handoff
+            # notes, the saved history, the reply to the client - follows from it (see speakers.py).
+            voice_recognition = worker.get_from_backpack('voice_recognition')
+            continuation = worker.get_from_backpack('continuation')
+            active_agent = worker.get_from_backpack('active_agent')
+            speaker, speaker_source = resolve_speaker(voice_recognition, response if isinstance(response, dict) else {},
+                                                      worker.get_from_backpack('speaker'), continuation,
+                                                      worker.get_from_backpack('recent_turns'))
+            worker.save_in_backpack('speaker', speaker)
+            worker.save_in_backpack('speaker_source', speaker_source)
+            if voice_recognition:
+                logger.info(f"{ColoredText.BLUE_TEXT}Worker for sessionID {session_id} amd requestID {request_id}: speaker '{speaker}' ({speaker_source}; ASR status {response.get('speaker_status')!r}, score {response.get('speaker_score')!r}).{ColoredText.END_TEXT}")
+
+            # An agent restricted to certain people (allowed_speakers) refuses anyone else - strictly, even
+            # mid-conversation. An unrecognized voice is refused as unknown_speaker, a recognized but unlisted one as
+            # speaker_not_allowed, so the client can say which.
+            if refuses_unlisted_speaker(voice_recognition, speaker, agent) and speaker != UNRECOGNIZED_SPEAKER:
+                logger.info(f"{ColoredText.BLUE_TEXT}Worker for sessionID {session_id} amd requestID {request_id}: '{agent['name']}' does not answer '{speaker}' (not in its allowed_speakers) - not sent to the LLM. Heard: '{heard}'{ColoredText.END_TEXT}")
+                to_client = {
+                    'success': False,
+                    'type': 'speaker_not_allowed',
+                    'sessionID': session_id,
+                    'requestID': request_id,
+                    'file_size': 0,
+                    'transcription': heard,
+                    'agent_name': agent['name'],
+                    'speaker': speaker,
+                    'message': f"{display_name(agent)} does not answer {speaker}."
+                }
+                worker.send_to_client(to_client, None)
+                worker.shutdown()
+                return
+
+            # An agent that only answers known voices refuses an unrecognized one - unless it is already talking with
+            # it (a continuation with that same agent). An agent with allowed_speakers refuses an unrecognized voice
+            # even then.
+            if refuses_unlisted_speaker(voice_recognition, speaker, agent) or refuses_unknown_speaker(voice_recognition, speaker, agent, continuation, active_agent):
+                logger.info(f"{ColoredText.BLUE_TEXT}Worker for sessionID {session_id} amd requestID {request_id}: '{agent['name']}' does not answer unrecognized voices - not sent to the LLM. Heard: '{heard}'{ColoredText.END_TEXT}")
+                to_client = {
+                    'success': False,
+                    'type': 'unknown_speaker',
+                    'sessionID': session_id,
+                    'requestID': request_id,
+                    'file_size': 0,
+                    'transcription': heard,
+                    'agent_name': agent['name'],
+                    'speaker': speaker,
+                    'message': f"Voice not recognized; {display_name(agent)} only answers voices it knows."
+                }
+                worker.send_to_client(to_client, None)
+                worker.shutdown()
+                return
+
             logger.info(f"{ColoredText.BLUE_TEXT}Worker for sessionID {session_id} amd requestID {request_id}: agent '{agent['name']}' answers ({reason}).{ColoredText.END_TEXT}")
 
             # If this agent missed part of the conversation (the user was talking to another agent), say what it
             # missed at the front of the request. The client still gets back - and logs - only what the user said.
             all_agents = worker.get_from_backpack('agents')
-            speaker = worker.get_from_backpack('speaker')
             note = build_handoff_note(worker.get_from_backpack('recent_turns'), agent['name'],
                                       {a.get('name'): a.get('display_name', '') for a in all_agents},
                                       max_turns=worker.get_from_backpack('handoff_max_turns'),
@@ -673,7 +789,10 @@ class ConversationalAiServer:
                 'agent_name': agent['name'],
                 'user_id': worker.get_from_backpack('user_id'),
                 'system_prompt_id': agent.get('system_prompt_id', 'default'),
-                'player_name': worker.get_from_backpack('player_name'),
+                # Fills '@@NAME@@' in the system prompt when the LLM session is created. With voice recognition on,
+                # the agent is talking to whoever is in the room, so the prompt names the household rather than one
+                # person; the speaker tag on each turn says who is actually talking.
+                'player_name': self.household_name if voice_recognition else worker.get_from_backpack('player_name'),
                 'continuous_save': agent.get('continuous_save', False),
                 'load_previous': agent.get('load_previous', False)
             }
@@ -737,7 +856,9 @@ class ConversationalAiServer:
                 'agent_name': worker.get_from_backpack('agent_name'),
                 'system_prompt_id': worker.get_from_backpack('system_prompt_id'),
                 # who the server took to be talking, so the client can record it in its recent turns
-                'speaker': worker.get_from_backpack('speaker')
+                'speaker': worker.get_from_backpack('speaker'),
+                # how that was decided (see speakers.py: request, voice, last_speaker or fallback)
+                'speaker_source': worker.get_from_backpack('speaker_source') or 'request'
             }
 
             worker.send_to_client(to_client, raw_data)
@@ -823,7 +944,9 @@ class ConversationalAiServer:
             'llm_port': int,
             'tts_host': str,
             'tts_port': int,
-            'llm_response_timeout_seconds': (int, float)
+            'llm_response_timeout_seconds': (int, float),
+            'household_name': str,
+            'log_file': str         # also log to this file (see amadeo_utils.logging_utils); missing = screen only
         }
 
         if not os.path.exists(filepath):
@@ -887,6 +1010,8 @@ class ConversationalAiServer:
         parser.add_argument('--llm-port', type=int, default=ConversationalAiServer.LLM_PORT, help=f"The LLM server port number (default: {ConversationalAiServer.LLM_PORT})")
         parser.add_argument('--llm-response-timeout-seconds', type=float, default=ConversationalAiServer.LLM_RESPONSE_TIMEOUT_SECONDS, help=f"How long to wait for the LLM server's reply to one request (default: {ConversationalAiServer.LLM_RESPONSE_TIMEOUT_SECONDS}). Raise it for the agent server, whose turns can take longer.")
 
+        parser.add_argument('--household-name', default=HOUSEHOLD_NAME, help=f"With a client's voice recognition on, what '@@NAME@@' in a system prompt becomes - the agent is talking to whoever is in the room, not one person (default: '{HOUSEHOLD_NAME}').")
+
         parser.add_argument("--json", type=str, default="", help="If this points to a valid JSON file, the ENTIRE parameter settings are pulled from that file, and the defaults - and other arguments passed from the command line - are ignored. If the JSON load fails for whatever reason, though, the defaults WILL be engaged. Just remember that if there is a dash in the arg name, its going to be an underscore in the JSON.")
 
         argDict = {}
@@ -914,6 +1039,8 @@ class ConversationalAiServer:
                     argDict['llm_host'] = config_dict.get('llm_host', ConversationalAiServer.LLM_HOST)
                     argDict['llm_port'] = config_dict.get('llm_port', ConversationalAiServer.LLM_PORT)
                     argDict['llm_response_timeout_seconds'] = config_dict.get('llm_response_timeout_seconds', ConversationalAiServer.LLM_RESPONSE_TIMEOUT_SECONDS)
+                    argDict['household_name'] = config_dict.get('household_name', HOUSEHOLD_NAME)
+                    argDict['log_file'] = config_dict.get('log_file', '')
 
                     logger.info(f"Config loaded from JSON {json_config_file}.")
 
@@ -938,6 +1065,8 @@ class ConversationalAiServer:
                 argDict['llm_host'] = args.llm_host
                 argDict['llm_port'] = args.llm_port
                 argDict['llm_response_timeout_seconds'] = args.llm_response_timeout_seconds
+                argDict['household_name'] = args.household_name
+                argDict['log_file'] = ''    # a log file is only configured through --json: screen only
 
         except SystemExit as e:
             argDict = {}

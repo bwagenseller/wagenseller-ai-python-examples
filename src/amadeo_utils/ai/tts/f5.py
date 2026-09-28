@@ -682,7 +682,8 @@ class AmadeoF5:
             'voice_mapping_file': str,
             'pause_duration': float,
             'segment_spacer_duration': float,
-            'gpu': int
+            'gpu': int,
+            'log_file': str        # also log to this file (see amadeo_utils.logging_utils); missing = screen only
         }
 
         if not os.path.exists(filepath):
@@ -779,6 +780,7 @@ class AmadeoF5:
                     argDict['model'] = config_dict.get('model', AmadeoF5.MODEL)
                     argDict['model_path'] = config_dict.get('model_path', AmadeoF5.MODEL_PATH)
                     argDict['gpu'] = config_dict.get('gpu', AmadeoF5.GPU_INDEX)
+                    argDict['log_file'] = config_dict.get('log_file', '')
 
                     argDict['voice_mapping_file'] = config_dict.get('voice_mapping_file', AmadeoF5.VOICE_MAPPING_FILE)
                     argDict['narrator_voice'] = config_dict.get('narrator_voice', AmadeoF5.NARRATOR_VOICE)
@@ -810,6 +812,7 @@ class AmadeoF5:
                 argDict['model'] = args.model
                 argDict['model_path'] = args.model_path
                 argDict['gpu'] = args.gpu
+                argDict['log_file'] = ''    # a log file is only configured through --json: screen only
                 argDict['voice_mapping_file'] = args.voice_mapping_file
                 argDict['use_different_speakers'] = args.use_different_speakers
                 argDict['narrator_voice'] = args.narrator_voice

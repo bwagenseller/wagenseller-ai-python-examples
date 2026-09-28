@@ -58,6 +58,13 @@ class ConversationalAiPipelineClient:
     RECENT_TURNS_KEPT = 10
     # Ask the LLM which agent was addressed when several are named and the rules can't tell (see routing.py)
     LLM_ROUTING = True
+    # Voice recognition off unless asked for; no location (every enrolled voice is compared)
+    VOICE_RECOGNITION = False
+    LOCATION_ID = ''
+    # Whether this spot's microphone may be recorded as field clips (the ASR server's config must allow it too):
+    # opt-in, so a new client records nothing until its config says so
+    SAVE_KNOWN_FIELD_CLIPS = False
+    SAVE_UNKNOWN_FIELD_CLIPS = False
 
     # type hints
     socket_client: AmadeoClient
@@ -77,6 +84,14 @@ class ConversationalAiPipelineClient:
 
         self.player_name = self.args_dict['player_name']
         self.user_id = self.args_dict['user_id']
+        # Voice recognition (CS-23): when on, the server works out who is speaking from their voice instead of taking
+        # player_name. location_id names this spot (room / device), whose enrolled voice samples are compared first.
+        self.voice_recognition = self.args_dict['voice_recognition']
+        self.location_id = self.args_dict['location_id']
+        # Field clips: whether the ASR server may save this microphone's speech (known / unrecognized voices), for
+        # enrolling later. Both default off; the server's own switches must be on as well.
+        self.save_known_field_clips = self.args_dict['save_known_field_clips']
+        self.save_unknown_field_clips = self.args_dict['save_unknown_field_clips']
 
         # Every agent (see amadeo_utils...wake_words.build_agents()). All of them go to the server with each request;
         # the server decides which one, if any, was spoken to.
@@ -129,6 +144,12 @@ class ConversationalAiPipelineClient:
                 if response.get('type') == 'not_addressed':
                     # No wake word, and not part of a conversation - the server heard it and ignored it
                     logger.info(f"{ColoredText.BLUE_TEXT}Not addressed to an agent (ignored): {response.get('transcription', '')}{ColoredText.END_TEXT}")
+                elif response.get('type') == 'unknown_speaker':
+                    # Voice recognition is on and the voice was not recognized, and the agent only answers known voices
+                    logger.info(f"{ColoredText.BLUE_TEXT}Unrecognized voice - {response.get('agent_name', 'the agent')} only answers known voices (ignored): {response.get('transcription', '')}{ColoredText.END_TEXT}")
+                elif response.get('type') == 'speaker_not_allowed':
+                    # Voice recognition is on, the voice was recognized, and the agent is restricted to other people
+                    logger.info(f"{ColoredText.BLUE_TEXT}{response.get('speaker', 'That speaker')} is not in {response.get('agent_name', 'the agent')}'s allowed_speakers (ignored): {response.get('transcription', '')}{ColoredText.END_TEXT}")
                 elif "busy" in message.lower():
                     logger.warning(f"{ColoredText.CYAN_TEXT}[Server busy, please wait for a moment.{ColoredText.END_TEXT}")
                 elif "queued" in message.lower():
@@ -197,7 +218,7 @@ class ConversationalAiPipelineClient:
                 #with open(output_file, 'wb') as f:
                 #    f.write(raw_data)
 
-                logger.info(f"{ColoredText.YELLOW_TEXT}You:{ColoredText.END_TEXT} {transcription}")
+                logger.info(f"{ColoredText.YELLOW_TEXT}{speaker if self.voice_recognition else 'You'}:{ColoredText.END_TEXT} {transcription}")
                 logger.info(f"{ColoredText.GREEN_TEXT}{agent_name or 'Response'}:{ColoredText.END_TEXT} {llm_response}")
                 #logger.info(f"{ColoredText.BLUE_TEXT}sessionID: {sessionID} requestID: {requestID} audio file: {output_file}{ColoredText.END_TEXT}")
                 logger.info(f"{ColoredText.BLUE_TEXT}sessionID: {sessionID} requestID: {requestID} {ColoredText.END_TEXT}")
@@ -476,7 +497,11 @@ class ConversationalAiPipelineClient:
                                         pipeline=self.pipeline, # necessary
                                         user_id=self.user_id,
                                         player_name=self.player_name,
-                                        speaker=self.player_name,   # who is talking; voice recognition will set this later
+                                        speaker=self.player_name,   # who is talking, unless voice recognition says otherwise
+                                        voice_recognition=self.voice_recognition,
+                                        location_id=self.location_id,
+                                        save_known_field_clips=self.save_known_field_clips,
+                                        save_unknown_field_clips=self.save_unknown_field_clips,
                                         agents=self.agents,
                                         continuation=continuation,
                                         active_agent=self.active_agent if continuation else '',
@@ -570,8 +595,12 @@ class ConversationalAiPipelineClient:
 
                 "pipeline": "basic_conversational",
 
-                "player_name": "Alex",
-                "user_id": "alex",
+                "player_name": "Kevin",
+                "user_id": "kevin",
+                "voice_recognition": true,
+                "location_id": "kitchen",
+                "save_known_field_clips": true,
+                "save_unknown_field_clips": true,
 
                 "conversation_window_seconds": 25,
                 "wake_word_max_position": 10,
@@ -587,7 +616,10 @@ class ConversationalAiPipelineClient:
                 "agents": [
                     {"name": "rose", "wake_words": ["rose", "hey rose"], "system_prompt_id": "assistant-rose"},
                     {"name": "crane", "display_name": "Frasier", "wake_words": ["dr crane", "frasier"],
-                     "system_prompt_id": "assistant-frasier", "voice": "frasier", "load_previous": false}
+                     "system_prompt_id": "assistant-frasier", "voice": "frasier", "load_previous": false,
+                     "allow_unknown_speakers": false},
+                    {"name": "rick", "wake_words": ["rick"], "system_prompt_id": "assistant-rick",
+                     "allowed_speakers": ["Kevin", "Sam"]}
                 ]
             }
 
@@ -596,6 +628,15 @@ class ConversationalAiPipelineClient:
             agent when the user switches from it to another mid-conversation; handoff_max_turns 0 turns notes off.
             llm_routing lets the server ask the LLM who was addressed when several agents are named and the rules
             (punctuation) can't tell; off, the first agent named answers.
+            voice_recognition (default false) has the server work out who is speaking from their voice rather than
+            taking player_name; location_id names this spot, whose enrolled voices are compared first. An agent with
+            allow_unknown_speakers false (default true) refuses an unrecognized voice, except to carry on a
+            conversation it is already having with it. An agent with allowed_speakers (default empty: anyone)
+            answers only those people - the names the voice profiles give them, ignoring case - and refuses anyone
+            else, an unrecognized voice included, even mid-conversation. Both need voice_recognition on.
+            save_known_field_clips / save_unknown_field_clips (default false) let the ASR server keep this
+            microphone's speech of known / unrecognized voices as field clips, for enrolling later - only if the
+            ASR server's config allows it too. Leave them out where nothing should be recorded.
             The older single-agent form - 'voice', 'system_prompt_id', 'continuous_save' and
             'load_previous' at the top level, with no 'agents' - still works: it becomes one always-listening agent.
 
@@ -628,6 +669,10 @@ class ConversationalAiPipelineClient:
             'handoff_max_turns': int,
             'handoff_max_chars': int,
             'llm_routing': bool,
+            'voice_recognition': bool,
+            'location_id': str,
+            'save_known_field_clips': bool,
+            'save_unknown_field_clips': bool,
             'agent_defaults': dict,   # the agent keys are checked by build_agents()
             'agents': list
         }
@@ -712,6 +757,11 @@ class ConversationalAiPipelineClient:
 
         parser.add_argument("-rt", "--response-timeout-seconds", type=float, default=ConversationalAiPipelineClient.RESPONSE_TIMEOUT_SECONDS, help=f"How long to wait for the server's reply to one spoken request (default: {ConversationalAiPipelineClient.RESPONSE_TIMEOUT_SECONDS}). Must exceed the server's llm_response_timeout_seconds plus ASR and TTS time.")
 
+        parser.add_argument("-vr", "--voice-recognition", action="store_true", help="Have the server work out who is speaking from their voice, instead of assuming it is player-name (basic_conversational pipeline only).")
+        parser.add_argument("--save-known-field-clips", action="store_true", help="Let the ASR server keep this microphone's speech of known voices as field clips (its config must allow it too).")
+        parser.add_argument("--save-unknown-field-clips", action="store_true", help="Let the ASR server keep this microphone's speech of unrecognized voices as field clips (its config must allow it too).")
+        parser.add_argument("-loc", "--location-id", type=str, default=ConversationalAiPipelineClient.LOCATION_ID, help="Which spot / device this client is (e.g. 'office'); voices enrolled here are compared first (basic_conversational pipeline, with voice recognition).")
+
         parser.add_argument("-j", "--json", type=str, default="", help="If this points to a valid JSON file, the ENTIRE parameter settings are pulled from that file, and the defaults - and other arguments passed from the command line - are ignored. If the JSON load fails for whatever reason, though, the defaults WILL be engaged.")
 
         argDict = {}
@@ -744,6 +794,10 @@ class ConversationalAiPipelineClient:
                     argDict['handoff_max_turns'] = config_dict.get('handoff_max_turns', HANDOFF_MAX_TURNS)
                     argDict['handoff_max_chars'] = config_dict.get('handoff_max_chars', HANDOFF_MAX_CHARS)
                     argDict['llm_routing'] = config_dict.get('llm_routing', ConversationalAiPipelineClient.LLM_ROUTING)
+                    argDict['voice_recognition'] = config_dict.get('voice_recognition', ConversationalAiPipelineClient.VOICE_RECOGNITION)
+                    argDict['location_id'] = config_dict.get('location_id', ConversationalAiPipelineClient.LOCATION_ID)
+                    argDict['save_known_field_clips'] = config_dict.get('save_known_field_clips', ConversationalAiPipelineClient.SAVE_KNOWN_FIELD_CLIPS)
+                    argDict['save_unknown_field_clips'] = config_dict.get('save_unknown_field_clips', ConversationalAiPipelineClient.SAVE_UNKNOWN_FIELD_CLIPS)
 
                     # agent_defaults + agents (or the older top-level voice / system_prompt_id / ... keys)
                     argDict['agents'] = build_agents(config_dict, ConversationalAiPipelineClient.agent_fallback())
@@ -775,6 +829,10 @@ class ConversationalAiPipelineClient:
                 argDict['handoff_max_turns'] = HANDOFF_MAX_TURNS
                 argDict['handoff_max_chars'] = HANDOFF_MAX_CHARS
                 argDict['llm_routing'] = ConversationalAiPipelineClient.LLM_ROUTING
+                argDict['voice_recognition'] = args.voice_recognition
+                argDict['location_id'] = args.location_id
+                argDict['save_known_field_clips'] = args.save_known_field_clips
+                argDict['save_unknown_field_clips'] = args.save_unknown_field_clips
 
                 # The command line describes one agent, with no wake words: it is always listening, as before
                 argDict['agents'] = build_agents({'voice': args.voice, 'system_prompt_id': args.system_prompt_id,
@@ -782,6 +840,14 @@ class ConversationalAiPipelineClient:
                                                  ConversationalAiPipelineClient.agent_fallback())
 
                 logger.debug(f"{ColoredText.BLUE_TEXT}ConversationalAiPipelineClient.get_args_dict_client: Config loaded; host: {argDict['host']} port: {argDict['port']}.{ColoredText.END_TEXT}")
+
+            # allowed_speakers and field clips only mean something when the server knows who is talking
+            if not argDict.get('voice_recognition'):
+                if argDict.get('save_known_field_clips') or argDict.get('save_unknown_field_clips'):
+                    logger.warning(f"{ColoredText.YELLOW_TEXT}save_*_field_clips is on, but voice_recognition is off - nothing is saved until voice recognition is turned on.{ColoredText.END_TEXT}")
+                restricted = [a['name'] for a in argDict['agents'] if a.get('allowed_speakers')]
+                if restricted:
+                    logger.warning(f"{ColoredText.YELLOW_TEXT}allowed_speakers is set on {restricted}, but voice_recognition is off - it has no effect until voice recognition is turned on.{ColoredText.END_TEXT}")
 
             if argDict['pipeline'] not in VALID_PIPELINES:
                 logger.warning(f"{ColoredText.YELLOW_TEXT}Pipeline {argDict['pipeline']} not in list {VALID_PIPELINES} - setting to {VALID_PIPELINES[0]}.{ColoredText.END_TEXT}")

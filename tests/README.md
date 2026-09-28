@@ -35,6 +35,8 @@ Tests read it through `testlib/settings.py`, and a test that needs a missing set
 | `bash_python` | The python of the env that runs `get_grades` (live and audit scripts only). |
 | `media_python` | The python of the env with sounddevice / pygame / webrtcvad (the conversational AI client check). |
 | `ai_tools_config_dir` | The tools' own config files (never in the repo): the `ai_tools` suite and the live scripts. |
+| `stt_python` | The python of the env with WhisperX and pyannote (the `asr` suite's model check). |
+| `speaker_id_voices_dir` | Synthetic test voices rendered by `asr/make_synthetic_voices.py` (Kokoro stock voices, never a real person). |
 
 A suite whose python is not set is skipped. A baseline whose model is not in `model_dir` is skipped, not failed.
 
@@ -56,6 +58,8 @@ tests/
   client_server/                AmadeoServer / AmadeoClient (the shared socket layer)
   ai_tools/                     the agent's tool scripts (scripts/ai/ai-tools/)
   conversational_ai/            the conversational AI pipeline: wake words, agents, ASR gate, client config
+  logging/                      server log files (amadeo_utils.logging_utils) and the servers' 'log_file' setting
+  asr/                          speech to text support: speaker identification (voice recognition)
   security/                     network / file-write audits (run by hand; no suite)
 ```
 

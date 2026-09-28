@@ -36,5 +36,7 @@
 
     "encrypted": false,
 
-    "debug": false
+    "debug": false,
+
+    "log_file": "/path/to/logs/role-play-server.log"
 }

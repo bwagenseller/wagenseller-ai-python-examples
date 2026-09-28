@@ -786,7 +786,8 @@ class AmadeoKokoro:
             'voice_mapping_file': str,
             'pause_duration': float,
             'segment_spacer_duration': float,
-            'gpu': int
+            'gpu': int,
+            'log_file': str        # also log to this file (see amadeo_utils.logging_utils); missing = screen only
         }
 
         if not os.path.exists(filepath):
@@ -880,6 +881,7 @@ class AmadeoKokoro:
                     argDict['pause_duration'] = config_dict.get('pause_duration', AmadeoKokoro.PAUSE_DURATION)
                     argDict['segment_spacer_duration'] = config_dict.get('segment_spacer_duration', AmadeoKokoro.SEGMENT_SPACER_DURATION)
                     argDict['gpu'] = config_dict.get('gpu', AmadeoKokoro.GPU_INDEX)
+                    argDict['log_file'] = config_dict.get('log_file', '')
 
                     logger.info(f"Config loaded from JSON {json_config_file}.")
 
@@ -909,6 +911,7 @@ class AmadeoKokoro:
 
                 argDict['model_path'] = args.model_path
                 argDict['gpu'] = args.gpu
+                argDict['log_file'] = ''    # a log file is only configured through --json: screen only
 
                 logger.info(f"Config loaded from args / defaults.")
 
