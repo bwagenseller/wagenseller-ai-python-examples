@@ -4,6 +4,7 @@ import sys
 import threading
 import webrtcvad
 import argparse
+import numpy as np
 from amadeo_utils.colored_text import ColoredText
 from amadeo_utils.client.amadeo_client import AmadeoClient
 from amadeo_utils.media_utils.audio_devices import prefer_pulse_defaults
@@ -23,6 +24,35 @@ PLAIN_LOG_FORMAT = '%(asctime)s - %(message)s'
 logging.basicConfig(level=logging.INFO, format=DIAGNOSTIC_LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
+# How far back from the length limit a forced cut looks for a quiet moment (see quietest_cut)
+FORCED_CUT_SEARCH_MS = 2000
+
+
+def quietest_cut(buffer: bytes, frame_bytes: int, search_frames: int) -> int:
+    """
+    Where to cut a chunk of speech that has grown too long without a pause (a radio show, say): at the end of the
+    quietest frame among the last search_frames. That is usually the small dip between two words, so the cut rarely
+    lands in the middle of one.
+
+    Args:
+        buffer: the chunk so far - 16 bit mono PCM, a whole number of frames.
+        frame_bytes: bytes per VAD frame.
+        search_frames: how many of the most recent frames to consider.
+
+    Returns:
+        int: the byte offset to cut at - everything before it is sent, the rest is kept for the next chunk. Always at
+        least one frame in, so something is sent, and at most the whole buffer.
+    """
+    frames = len(buffer) // frame_bytes
+    if frames <= 1:
+        return len(buffer)
+    first = max(1, frames - search_frames)      # never frame 0: the cut must leave something to send
+    samples = np.frombuffer(bytes(buffer[:frames * frame_bytes]), dtype=np.int16).astype(np.float32).reshape(frames, -1)
+    energy = np.mean(samples[first:] ** 2, axis=1)
+    quietest = first + int(np.argmin(energy))
+    return (quietest + 1) * frame_bytes
+
+
 class WhisperXClient:
 
     SAMPLE_RATE = 16000 # in Hz. WhisperX EXCLUSIVELY uses 16k - anything else it will downsample. Might as well use it from the start.\, and hard-code it in.
@@ -33,6 +63,12 @@ class WhisperXClient:
     VAD_FRAME_DURATION_MS = 30
     VAD_AGGRESSIVENESS = 2
     SILENCE_DURATION_TO_END_BUFFER_MS = 800
+    # A chunk that never pauses is sent once it is this long (cut at its quietest moment); 0 = no limit, wait for a
+    # pause however long it takes (right for a microphone, where people stop between sentences)
+    MAX_CHUNK_SECONDS = 0.0
+
+    # What is being listened to, for the start-up message (a subclass that listens to something else changes it)
+    AUDIO_SOURCE_LABEL = "microphone"
 
 
     """
@@ -106,8 +142,39 @@ class WhisperXClient:
             logger.info(f"{ColoredText.GREEN_TEXT}Connection closed. Exiting.{ColoredText.END_TEXT}")
             sys.exit(0)
 
+    def audio_frames(self):
+        """
+        The audio to transcribe: yields one VAD frame at a time (VAD_FRAME_SIZE samples of 16 kHz mono int16, as
+        bytes) while the client is recording. This one reads the default microphone; a subclass can listen to
+        something else by overriding it (transcribe_output.py listens to the speakers).
+
+        :return: a generator of bytes, one VAD frame each.
+        """
+        # Route through PulseAudio where available: raw ALSA capture devices
+        # reject SAMPLE_RATE (16 kHz) outright rather than resampling.
+        prefer_pulse_defaults()
+
+        with sd.InputStream(samplerate=WhisperXClient.SAMPLE_RATE, channels=1, dtype='int16', blocksize=self.VAD_FRAME_SIZE) as stream:
+            while self.is_recording:
+                audio_frame, _ = stream.read(self.VAD_FRAME_SIZE)
+                yield audio_frame.tobytes()
+
+    def send_audio(self, segment: bytes, message: str):
+        """
+        Sends one chunk of speech to the server; the transcription comes back through handle_server_response.
+
+        :param segment: 16 bit mono 16 kHz PCM.
+        :param message: a note for the server's log.
+        """
+        self.socket_client.send_persistent_request(command="transcribe", message=message, binary_data=segment)
+
     def run_client(self):
         signal.signal(signal.SIGINT, lambda s, f: self.graceful_shutdown())
+
+        # Set before anything can fail, so the 'finally' below can always look at them (a failed connection used to
+        # end in a NameError there instead of a clean exit)
+        current_audio_buffer = bytearray()
+        has_spoken = False
 
         try:
             logger.info(f"{ColoredText.BLUE_TEXT}Attempting to connect to server on host: {ColoredText.END_TEXT}{ColoredText.YELLOW_TEXT}{self.args_dict['host']}{ColoredText.END_TEXT}{ColoredText.BLUE_TEXT} port: {ColoredText.END_TEXT}{ColoredText.YELLOW_TEXT}{self.args_dict['port']}{ColoredText.END_TEXT}")
@@ -117,11 +184,7 @@ class WhisperXClient:
                 logger.error(f"{ColoredText.RED_TEXT}Failed to establish connection. Exiting.{ColoredText.END_TEXT}")
                 return
 
-            logger.info(f"{ColoredText.BLUE_TEXT}Starting microphone stream. Press Ctrl+C to exit.{ColoredText.END_TEXT}")
-
-            # Route through PulseAudio where available: raw ALSA capture devices
-            # reject SAMPLE_RATE (16 kHz) outright rather than resampling.
-            prefer_pulse_defaults()
+            logger.info(f"{ColoredText.BLUE_TEXT}Starting {self.AUDIO_SOURCE_LABEL} stream. Press Ctrl+C to exit.{ColoredText.END_TEXT}")
 
             # Initialize VAD and audio processing variables
             vad = webrtcvad.Vad(self.args_dict['vad_aggressiveness'])
@@ -130,40 +193,47 @@ class WhisperXClient:
             silent_frames_threshold = int(self.args_dict['silence_duration'] / self.args_dict['vad_frame_duration'])
             has_spoken = False
 
-            with sd.InputStream(samplerate=WhisperXClient.SAMPLE_RATE, channels=1, dtype='int16', blocksize=self.VAD_FRAME_SIZE) as stream:
-                while self.is_recording:
-                    audio_frame, _ = stream.read(self.VAD_FRAME_SIZE)
-                    int16_data = audio_frame.tobytes()
+            # The length limit for audio that never pauses (0 = none), and how far back a forced cut looks for a gap
+            frame_bytes = self.VAD_FRAME_SIZE * 2
+            max_chunk_seconds = self.args_dict.get('max_chunk_seconds') or 0
+            max_chunk_bytes = int(max_chunk_seconds * WhisperXClient.SAMPLE_RATE) * 2 if max_chunk_seconds > 0 else 0
+            search_frames = max(1, int(FORCED_CUT_SEARCH_MS / self.args_dict['vad_frame_duration']))
 
-                    is_speech = vad.is_speech(int16_data, WhisperXClient.SAMPLE_RATE)
+            for int16_data in self.audio_frames():
+                if not self.is_recording:
+                    break
 
-                    if is_speech:
-                        has_spoken = True
+                is_speech = vad.is_speech(int16_data, WhisperXClient.SAMPLE_RATE)
+
+                if is_speech:
+                    has_spoken = True
+                    silent_frames_count = 0
+                    current_audio_buffer.extend(int16_data)
+
+                elif has_spoken:
+                    silent_frames_count += 1
+                    current_audio_buffer.extend(int16_data)
+
+                    if silent_frames_count >= silent_frames_threshold:
+                        speech_segment_bytes = current_audio_buffer[:-silent_frames_threshold * self.VAD_FRAME_SIZE * 2]
+
+                        if len(speech_segment_bytes) > 0:
+                            logger.debug(f"{ColoredText.BLUE_TEXT}End of speech detected. Sending audio chunk to server...{ColoredText.END_TEXT}")
+                            # The response is handled by the handle_server_response callback
+                            self.send_audio(bytes(speech_segment_bytes), "Audio chunk for transcription")
+
+                        current_audio_buffer = bytearray()
                         silent_frames_count = 0
-                        current_audio_buffer.extend(int16_data)
+                        has_spoken = False
 
-                    elif has_spoken:
-                        silent_frames_count += 1
-                        current_audio_buffer.extend(int16_data)
-
-                        if silent_frames_count >= silent_frames_threshold:
-                            speech_segment_bytes = current_audio_buffer[:-silent_frames_threshold * self.VAD_FRAME_SIZE * 2]
-
-                            if len(speech_segment_bytes) > 0:
-                                logger.debug(f"{ColoredText.BLUE_TEXT}End of speech detected. Sending audio chunk to server...{ColoredText.END_TEXT}")
-
-                                # Send using the new persistent request method with binary audio data
-                                response, raw_data = self.socket_client.send_persistent_request(
-                                    command="transcribe",
-                                    message="Audio chunk for transcription",
-                                    binary_data=speech_segment_bytes # Send as binary data after JSON
-                                )
-
-                                # Response is handled automatically by handle_server_response callback
-
-                            current_audio_buffer = bytearray()
-                            silent_frames_count = 0
-                            has_spoken = False
+                # Audio that never pauses long enough (a radio show) would otherwise grow into one endless chunk:
+                # once it reaches the limit, send it up to its quietest recent moment and keep the rest going
+                if max_chunk_bytes and has_spoken and len(current_audio_buffer) >= max_chunk_bytes:
+                    cut = quietest_cut(current_audio_buffer, frame_bytes, search_frames)
+                    logger.debug(f"{ColoredText.BLUE_TEXT}Chunk reached {max_chunk_seconds:g} s without a pause; sending {cut / 2 / WhisperXClient.SAMPLE_RATE:.1f} s of it.{ColoredText.END_TEXT}")
+                    self.send_audio(bytes(current_audio_buffer[:cut]), "Audio chunk for transcription (length limit)")
+                    current_audio_buffer = current_audio_buffer[cut:]
+                    silent_frames_count = 0
 
         except KeyboardInterrupt:
             pass
@@ -175,11 +245,7 @@ class WhisperXClient:
                 if len(current_audio_buffer) > 0 and has_spoken:
                     logger.info(f"{ColoredText.BLUE_TEXT}Sending final audio chunk to server...{ColoredText.END_TEXT}")
 
-                    self.socket_client.send_persistent_request(
-                        command="transcribe",
-                        message="Final audio chunk",
-                        binary_data=current_audio_buffer  # Send as binary data
-                    )
+                    self.send_audio(bytes(current_audio_buffer), "Final audio chunk")
 
                 self.graceful_shutdown()
 
@@ -212,19 +278,35 @@ class WhisperXClient:
         if not diagnostics:
             logger.info(f"{ColoredText.BLUE_TEXT}Diagnostics off - run with --diagnostics to see the detected language and confidence scores.{ColoredText.END_TEXT}")
 
+    @staticmethod
+    def build_arg_parser(description: str = 'Run a WhisperX client, as you see fit.') -> argparse.ArgumentParser:
+        """
+        The command-line options every streaming WhisperX client shares (server, VAD, diagnostics). A client that
+        needs more (transcribe_output.py's --output, say) adds its own to the parser this returns.
+
+        Args:
+            description: the --help description.
+
+        Returns:
+            argparse.ArgumentParser: the parser, with the shared options added.
+        """
+        parser = argparse.ArgumentParser(description=description)
+        parser.add_argument("-ho", "--host", default=WhisperXClient.HOST,help="The hostname/IP that the server will bind to.")
+        parser.add_argument("-p", "--port", type=int, default=WhisperXClient.PORT,help="The port that the server will listen on for requests.")
+        parser.add_argument("-vfd", "--vad_frame_duration", type=int, default=WhisperXClient.VAD_FRAME_DURATION_MS,help="The VAD frame duration, in milliseconds.")
+        parser.add_argument("-va", "--vad_aggressiveness", type=int, default=WhisperXClient.VAD_AGGRESSIVENESS,help="The VAD aggressiveness, from 1 to 3. 3 = block most non-human speech, 1 = be a bit more permissive.")
+        parser.add_argument("-sd", "--silence_duration", type=int, default=WhisperXClient.SILENCE_DURATION_TO_END_BUFFER_MS,help="The number of milliseconds that must pass that will denote an end to speech (and the beginning of processing the speech segment).")
+        parser.add_argument("-mcs", "--max_chunk_seconds", type=float, default=WhisperXClient.MAX_CHUNK_SECONDS, help="Send a chunk once it is this many seconds long even without a pause, cut at its quietest recent moment - for audio that never stops, like a radio show. 0 = no limit: wait for a pause (default here: %(default)s).")
+        parser.add_argument("-d", "--diagnostics", action="store_true",help="Show diagnostic detail alongside each transcription: the function and line that logged it, plus the detected language and its confidence and the average word confidence. Off by default, which prints just the timestamp and the transcription itself.")
+        return parser
+
     """
     Gets args dictionary for a generic WhisperX streaming client
     """
     @staticmethod
     def get_args_dict_streaming_client() -> dict:
 
-        parser = argparse.ArgumentParser(description='Run a WhisperX client, as you see fit.')
-        parser.add_argument("-ho", "--host", default=WhisperXClient.HOST,help="The hostname/IP that the server will bind to.")
-        parser.add_argument("-p", "--port", type=int, default=WhisperXClient.PORT,help="The port that the server will listen on for requests.")
-        parser.add_argument("-vfd", "--vad_frame_duration", type=int, default=WhisperXClient.VAD_FRAME_DURATION_MS,help="The VAD frame duration, in milliseconds.")
-        parser.add_argument("-va", "--vad_aggressiveness", type=int, default=WhisperXClient.VAD_AGGRESSIVENESS,help="The VAD aggressiveness, from 1 to 3. 3 = block most non-human speech, 1 = be a bit more permissive.")
-        parser.add_argument("-sd", "--silence_duration", type=int, default=WhisperXClient.SILENCE_DURATION_TO_END_BUFFER_MS,help="The number of milliseconds that must pass that will denote an end to speech (and the beginning of processing the speech segment).")
-        parser.add_argument("-d", "--diagnostics", action="store_true",help="Show diagnostic detail alongside each transcription: the function and line that logged it, plus the detected language and its confidence and the average word confidence. Off by default, which prints just the timestamp and the transcription itself.")
+        parser = WhisperXClient.build_arg_parser()
 
         argDict = {}
 
@@ -238,6 +320,7 @@ class WhisperXClient:
             argDict['vad_aggressiveness'] = args.vad_aggressiveness
             argDict['silence_duration'] = args.silence_duration
             argDict['diagnostics'] = args.diagnostics
+            argDict['max_chunk_seconds'] = args.max_chunk_seconds
 
             logger.debug(f"{ColoredText.BLUE_TEXT}WhisperXUtils.get_args_dict_client: Config loaded; host: {argDict['host']} port: {argDict['port']}.{ColoredText.END_TEXT}")
 

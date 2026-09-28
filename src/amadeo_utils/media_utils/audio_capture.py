@@ -209,6 +209,53 @@ class PulseAudioCapture:
         return pcm.astype(np.float32) / 32768.0
 
     # ------------------------------------------------------------------
+    # Streaming
+    # ------------------------------------------------------------------
+
+    def stream_raw(self, chunk_frames: int | None = None, stop_event: threading.Event | None = None):
+        """
+        Yields the live audio of ONE source as raw s16le PCM chunks, for callers that process audio as it arrives
+        (a live transcriber, say) rather than recording to a file first like record(). The chunks come at the
+        sample rate and channel count given to the constructor - parec converts - so asking for 16000 Hz mono
+        gives exactly what WebRTC VAD and WhisperX want.
+
+        Example:
+
+            capture = PulseAudioCapture(capture_speakers=True, sample_rate=16000, channels=1)
+            for chunk in capture.stream_raw(chunk_frames=480):      # 30 ms of 16 kHz mono
+                ...
+
+        The parec process is stopped when the generator is closed or garbage-collected (breaking out of the loop
+        is enough), when stop_event is set, or if parec exits.
+
+        :param chunk_frames: frames per chunk; None = CHUNK_MS worth at the constructor's rate
+        :param stop_event: a threading.Event another thread can set to end the stream
+        :return: a generator of bytes, each chunk_frames * channels * 2 bytes long (the last one may be shorter)
+        :raises ValueError: if more than one source is configured (mixing two live streams is record()'s job)
+        :raises RuntimeError: if the source cannot be found (see _resolve_sources)
+        """
+        sources = self._resolve_sources()
+        if len(sources) != 1:
+            raise ValueError("stream_raw() streams one source: configure either the speakers or the mic, not both.")
+        chunk_bytes = (chunk_frames or self.chunk_frames) * BYTES_PER_SAMPLE * self.channels
+
+        if self.verbose:
+            print(f"Streaming: {sources[0]} ({self.sample_rate} Hz, {self.channels} ch)")
+        proc = self._spawn_parec(sources[0])
+        try:
+            while not (stop_event and stop_event.is_set()):
+                data = proc.stdout.read(chunk_bytes)
+                if not data:
+                    break               # parec ended (the source went away)
+                yield data
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    # ------------------------------------------------------------------
     # Recording
     # ------------------------------------------------------------------
 

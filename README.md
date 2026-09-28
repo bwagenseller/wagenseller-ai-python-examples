@@ -179,7 +179,7 @@ server's config to also write a log file (plain text, one file a day, 90 days ke
 ## The scripts — `scripts/`
 
 - **`ai/combos/conversational_ai/`** — the full voice pipeline (server + client). ⭐ start here
-- **`ai/asr/whisperx/streaming/`** — streaming transcription client/server
+- **`ai/asr/whisperx/streaming/`** — streaming transcription: the ASR server, a live microphone client, and `transcribe_output.py`, which transcribes whatever is playing through the speakers and saves it to a WAV
 - **`ai/asr/speaker_id/`** — voice enrollment for speaker identification (`enroll_voice.py`), with its own README
 - **`ai/llm/llama/llama_stream/`** — streaming LLM server + client (role-play & knowledge-base modes)
 - **`ai/llm/llama/llama_local_vector_db/`** — role-play chat with vector-DB long-term memory
