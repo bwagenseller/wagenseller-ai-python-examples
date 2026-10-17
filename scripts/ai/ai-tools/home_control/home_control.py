@@ -136,7 +136,10 @@ DEFINITION = {
                    "dims lights, opens or closes covers (blinds, garage doors), sets the thermostat, and reports the "
                    "state of devices and sensors. Pass the device or room in the user's own words (\"kitchen lights\", "
                    "\"the basement\", \"thermostat\"); never guess an entity id. Use action 'list' to see what can be "
-                   "controlled. If the target is ambiguous the error lists candidates: ask the user which one.",
+                   "controlled. If the target is ambiguous the error lists candidates: ask the user which one. "
+                   "This tool is the only way to control or check a device: always call it for any request about "
+                   "lights, switches, plugs, fans, doors or the thermostat, and never say a device changed (or "
+                   "exists) unless this tool reported it.",
     "parameters": {
         "type": "object",
         "properties": {
