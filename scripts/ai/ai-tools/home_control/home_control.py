@@ -158,6 +158,27 @@ DEFINITION = {
     },
     "flags": {"physical": True},
     "timeout_s": 15,            # a SmartThings command goes HA -> cloud -> hub -> device, typically 1-3 s
+    # Requests this tool must handle (registry.CallCheck). Live, 2026-10-17: with made-up answers in their saved
+    # history, the agents said "the office lights are on" and "the doghouse light is on" without calling anything.
+    # A match only makes the loop ask the model to reconsider once, so a false positive costs one generation. Kept to
+    # wording about controlling or checking a device; "lights" alone ("Christmas lights on my list") does not match.
+    "call_check": {
+        "patterns": [
+            # turn / switch / shut / flip ... on / off / up / down, up to five words apart ("turn the office lights off")
+            r"\b(turn|switch|shut|flip|power)\w*(\W+\w+){0,5}?\W+(on|off|up|down)\b",
+            # a device word then on / off ("are the porch lights on", "lamp off") - but not "lights on my list"
+            r"\b(lights?|lamps?|fans?|plugs?|outlets?|switch(es)?)\b(\W+\w+){0,3}?\W+(on|off)\b"
+            r"(?!\s+(my|your|his|her|their|our|a|the)\b)",
+            r"\b(dim|brighten)\w*\b",
+            r"\bthermostat\b",
+            r"\b(set|raise|lower|bump)\w*(\W+\w+){0,4}?\W+(heat|heating|temperature|a\.?c\.?|air conditioning)\b",
+            r"\bgarage\b",
+            r"\b(un)?lock\w*(\W+\w+){0,3}?\W+doors?\b",
+            # not plain "doors": "open the door to the North Pole" is make-believe; garage doors match above
+            r"\b(open|close|raise|lower)\w*(\W+\w+){0,4}?\W+(blinds?|shades?|curtains?)\b",
+        ],
+        "notice": "Nothing in the house was changed or checked.",
+    },
 }
 
 
@@ -629,7 +650,10 @@ def run_calls(ha: HomeAssistantWS, calls, action: str, area: Optional[str], skip
         result["area"] = area
     if note:
         result["note"] = note
-    return ToolAnswer(result, summary)
+    # A clean success is just "Done." (Brent, 2026-10-17): the server says it instead of the model's own words. Anything
+    # to explain - a device skipped or failed, a value clamped - gets no fixed reply, so the model explains it.
+    clean = names and not skipped and not failed and not note
+    return ToolAnswer(result, summary, reply="Done." if clean else None)
 
 
 ACTION_DOMAINS = {}                                       # action -> the domains that can do it (one-device matches)

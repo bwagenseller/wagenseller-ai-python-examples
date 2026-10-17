@@ -31,6 +31,14 @@ context, no INTERNAL_COMMANDS or PHYSICAL tool may run (untrusted text plus a lo
 a garage door, is how injected text does damage). With the quarantine (see quarantine.py) untrusted text never reaches the
 main model in 'auto' or 'delegate' mode, so in practice these only bite in 'direct' mode and
 inside a worker.
+
+The call check (not a security flag)
+------------------------------------
+A tool may also declare a CallCheck: regular expressions that recognise a user request it should
+handle. When the main model answers such a request without calling the tool, the loop asks it once
+to reconsider, and if it still doesn't call, says so to the user (see ToolStream.run_tool_loop).
+It exists because a model will claim "the lights are on" without calling anything, especially once
+an earlier made-up answer is in its history (CS-24, 2026-10-17). It changes no permissions.
 """
 import json
 import re
@@ -56,6 +64,30 @@ RECALL = "recall"
 
 
 @dataclass
+class CallCheck:
+    """
+    How to recognise a request the tool must handle, so a reply that skips it can be caught (see the module docstring).
+
+    Attributes:
+        patterns (list[str]): Regular expressions, matched case-insensitively anywhere in the user's request. Any one
+            matching means the tool should have been called.
+        notice (str): Told to the user when the model still answers without calling the tool, e.g. "Nothing in the
+            house was changed or checked." Empty: a generic notice naming the tool.
+    """
+    patterns: List[str]
+    notice: str = ""
+    _compiled: List["re.Pattern"] = field(init=False, repr=False, compare=False, default_factory=list)
+
+    def __post_init__(self):
+        # Compiled here so a bad pattern stops the server at startup instead of failing on some later request.
+        self._compiled = [re.compile(p, re.IGNORECASE) for p in self.patterns]
+
+    def matches(self, request: str) -> bool:
+        """True if any pattern is found in the request."""
+        return bool(request) and any(p.search(request) for p in self._compiled)
+
+
+@dataclass
 class Tool:
     """
     One tool: what the model is shown, what runs, and how dangerous it is.
@@ -69,6 +101,7 @@ class Tool:
         outbound, private, untrusted_output (bool), internal_commands (str), needs_approval (bool),
         physical (bool): The security flags described in the module docstring.
         timeout_s (float): How long the function may run before the call counts as failed.
+        call_check (CallCheck | None): Requests this tool must handle; see CallCheck. Not a security flag.
     """
     name: str
     description: str
@@ -81,6 +114,7 @@ class Tool:
     needs_approval: bool = False
     physical: bool = False
     timeout_s: float = 10.0
+    call_check: Optional[CallCheck] = None
 
     def __post_init__(self):
         if self.internal_commands not in _INTERNAL_LEVELS:
@@ -267,9 +301,14 @@ class Summarized:
     summary is kept for later turns (decision 3: "a short result"). The tool knows what matters in its own output -
     the weather tool keeps the forecast, not the first 160 characters of its JSON. Tools whose output is untrusted
     should summarise facts ABOUT the result (a URL, a count), never text the result contains.
+
+    'reply' is optional: a fixed reply ("Done.") the user gets instead of the model's own words when every call in the
+    turn succeeded with one (see ToolStream.run_tool_loop). For actions whose success needs no explaining; leave it
+    out whenever there is something to explain (a partial failure, a clamped value) or a result to read out.
     """
     result: Any
     summary: str
+    reply: Optional[str] = None
 
 
 @dataclass
@@ -282,11 +321,13 @@ class ToolOutcome:
         content (str): What goes back to the model: the result, or an error message.
         truncated (bool): True if the result was cut to the per-result cap.
         summary (str | None): The tool's own one-line summary for history, if it gave one.
+        reply (str | None): The tool's fixed reply for the user, if it gave one (see Summarized).
     """
     ok: bool
     content: str
     truncated: bool = False
     summary: Optional[str] = None
+    reply: Optional[str] = None
 
 
 SUMMARY_CHARS = 160
@@ -381,13 +422,15 @@ def execute(tool: Tool, arguments: Dict[str, Any], max_result_chars: int) -> Too
         return ToolOutcome(False, f"{tool.name} did not finish within {tool.timeout_s:g} seconds.")
     except Exception as e:                      # a tool's own failure is data, not a crash
         return ToolOutcome(False, f"{tool.name} failed: {e}")
-    summary = None
+    summary = reply = None
     if isinstance(result, Summarized):
-        result, summary = result.result, shorten(str(result.summary))
+        reply = shorten(str(result.reply)) if result.reply else None
+        result, summary = result.result, (shorten(str(result.summary)) if result.summary else None)
     content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
     if len(content) > max_result_chars:
-        return ToolOutcome(True, content[:max_result_chars] + "\n[result truncated to fit the context window]", True, summary)
-    return ToolOutcome(True, content, False, summary)
+        return ToolOutcome(True, content[:max_result_chars] + "\n[result truncated to fit the context window]", True,
+                           summary, reply)
+    return ToolOutcome(True, content, False, summary, reply)
 
 
 # --------------------------------------------------------------------------------------------------

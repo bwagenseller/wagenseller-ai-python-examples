@@ -190,6 +190,17 @@ def run_checks(work, ha):
     ok, res, _, calls = call({"action": "set_temperature", "target": "den fan", "temperature": 70})
     check(not ok and not calls, "set_temperature on a fan refused", res)
 
+    print("== fixed reply ('Done.' for a clean success only)")
+    def reply(arguments):
+        return R.execute(tool, arguments, 20000).reply
+    check(reply({"action": "turn_off", "target": "Kitchen Ceiling"}) == "Done.", "clean single success -> 'Done.'")
+    check(reply({"action": "turn_off", "target": "kitchen lights"}) == "Done.", "clean area success -> 'Done.'")
+    check(reply({"action": "open", "target": "garage"}) is None, "an area with a skipped device -> no fixed reply")
+    check(reply({"action": "set_level", "target": "den fan", "level": 250}) is None, "a clamped value -> no fixed reply")
+    check(reply({"action": "turn_on", "target": "hot tub"}) is None, "a failure -> no fixed reply")
+    check(reply({"action": "status", "target": "front door"}) is None, "status -> no fixed reply (it must be read out)")
+    check(reply({"action": "list"}) is None, "list -> no fixed reply")
+
     print("== status and list")
     ok, res, summary, calls = call({"action": "status", "target": "front door"})
     check(ok and res["devices"][0]["state"] == "locked" and not calls, "status reads a blocked lock (no call)",

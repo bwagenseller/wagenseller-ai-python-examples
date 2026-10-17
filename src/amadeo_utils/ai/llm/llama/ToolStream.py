@@ -84,6 +84,10 @@ class LoopResult:
         terminated (str): 'answer' | 'round_cap' | 'time_cap' | 'context_cap'.
         generations (int): Model calls made by this loop (a worker's are counted in its own result).
         notes_taken (int): Times a worker condensed its raw tool results into its own notes (see _take_notes).
+        skipped (list[str]): Tools whose call_check matched the request but which the model still did not call after
+            being asked to reconsider (see _skipped_tools). The user is told, and the saved answer says so.
+        replies (list[str | None]): One entry per call the model made: the tool's fixed reply if the call succeeded
+            with one, else None (failed, refused, or a tool that gives none). See _fixed_reply.
     """
     answer: str = ""
     shown_to_user: List[str] = field(default_factory=list)
@@ -95,6 +99,8 @@ class LoopResult:
     terminated: str = "answer"
     generations: int = 0
     notes_taken: int = 0
+    skipped: List[str] = field(default_factory=list)
+    replies: List[Optional[str]] = field(default_factory=list)
 
 
 class ToolStream(StreamBase):
@@ -360,7 +366,7 @@ class ToolStream(StreamBase):
         for entry in self.argsDict.get('script_tools', []):
             tool = load_script_tool(entry['python'], entry['script'], entry.get('config'))
             registry.register(tool)
-            logger.info(f"{ColoredText.BLUE_TEXT}ToolStream: loaded script tool [{tool.name}] (outbound={tool.outbound}, private={tool.private}, untrusted_output={tool.untrusted_output}, internal_commands={tool.internal_commands}, physical={tool.physical}).{ColoredText.END_TEXT}")
+            logger.info(f"{ColoredText.BLUE_TEXT}ToolStream: loaded script tool [{tool.name}] (outbound={tool.outbound}, private={tool.private}, untrusted_output={tool.untrusted_output}, internal_commands={tool.internal_commands}, physical={tool.physical}, call_check={len(tool.call_check.patterns) if tool.call_check else 0} pattern(s)).{ColoredText.END_TEXT}")
         return registry
 
     # ------------------------------------------------------------------------------------------------------ sessions
@@ -627,7 +633,8 @@ class ToolStream(StreamBase):
             if self.tools_supported:
                 result = self.run_tool_loop(session, assembled.messages, session['policy'], session['taint'],
                                             reason_used, max_response_tokens, assembled.used_tokens,
-                                            session['max_tool_rounds'], self._clock())
+                                            session['max_tool_rounds'], self._clock(),
+                                            request=LlamaUtils.remove_instructions(user_input, self.HIDDEN_INSTRUCTION_DELIMITER))
             else:
                 result = LoopResult(answer=self.generate_once(assembled.messages, self.LOCAL_STOP, max_response_tokens,
                                                               reason_used, session['session_id'], assembled.used_tokens).strip(),
@@ -651,7 +658,7 @@ class ToolStream(StreamBase):
             return reply('', 'error', False, "The LLM goofed and didn't return a proper response; please try again.")
 
         self.persist_turn(session, user_input, result)
-        logger.info(f"{ColoredText.BLUE_TEXT}session_id {session['session_id']}: tool loop ended [{result.terminated}] after {result.generations} generation(s); ran {result.executed}, refused {result.refused}.{ColoredText.END_TEXT}")
+        logger.info(f"{ColoredText.BLUE_TEXT}session_id {session['session_id']}: tool loop ended [{result.terminated}] after {result.generations} generation(s); ran {result.executed}, refused {result.refused}, skipped {result.skipped}.{ColoredText.END_TEXT}")
         return reply(text, message="\n".join(self.collapse_notices(result.notices)))
 
     # speakable(): markdown that text-to-speech would read aloud as symbols.
@@ -746,6 +753,10 @@ class ToolStream(StreamBase):
         if not result.answer and not result.calls:
             return
         answer = result.answer or "(The results above were shown to the user.)"
+        if result.skipped:
+            # The reply may claim something a tool never did ("the lights are on"). Saved as it stands, it teaches every
+            # later turn that such claims need no tool (CS-24, 2026-10-17) - so the record says what really happened.
+            answer += f"\n\n({self._skipped_record(result.skipped)})"
         cleaned_user_input = LlamaUtils.remove_instructions(user_input, self.HIDDEN_INSTRUCTION_DELIMITER)
 
         def tokens(role: str, text: str) -> int:
@@ -794,7 +805,7 @@ class ToolStream(StreamBase):
 
     def run_tool_loop(self, session: Dict[str, Any], messages: List[Dict[str, Any]], policy: Tools.ToolPolicy,
                       taint: Tools.Taint, reason_used: bool, max_response_tokens: int, used_tokens: int,
-                      max_rounds: int, turn_start: float, worker: bool = False) -> LoopResult:
+                      max_rounds: int, turn_start: float, worker: bool = False, request: str = "") -> LoopResult:
         """
         Generate, run the calls, feed results back; repeat until an answer or a cap.
 
@@ -814,6 +825,8 @@ class ToolStream(StreamBase):
             max_rounds: Tool rounds allowed before the final pass.
             turn_start: The clock reading when the turn began; a worker shares its parent's.
             worker: True for a delegate worker's loop - the only loop that takes notes (see _take_notes).
+            request: The user's request as typed or spoken (hidden instructions removed), for the tools' call checks.
+                Empty - as for a worker - turns the check off.
 
         Returns:
             LoopResult
@@ -821,6 +834,7 @@ class ToolStream(StreamBase):
         result = LoopResult()
         scratch = list(messages)
         rounds = 0
+        nudged = False          # the call check asks the model to reconsider at most once per turn
         pending = []            # indexes in scratch of tool results not yet condensed into notes (workers only)
         context_limit = self.argsDict['generating_max_context_tokens'] * (1 - self.argsDict['buffer_context_pcnt'])
 
@@ -854,7 +868,23 @@ class ToolStream(StreamBase):
 
             if final or parsed.kind == ChatTemplate.TOOL_PARSE_ANSWER:
                 text = parsed.text if parsed.kind != ChatTemplate.TOOL_PARSE_MALFORMED else ""
-                result.answer = self._without_markers(ChatTemplate.truncate_at_stops(text, answer_stop)).strip()
+                answer = self._without_markers(ChatTemplate.truncate_at_stops(text, answer_stop)).strip()
+                # The call check: an answer to a request some offered tool must handle, with that tool never called, is
+                # most likely made up ("the office lights are on"). Ask once; if the model still answers, let the
+                # answer through but say what did not happen. Never on a cap's final pass - tools are off there.
+                skipped = [] if final else self._skipped_tools(offered, request, result)
+                if skipped and not nudged:
+                    nudged = True
+                    scratch.append({"role": "assistant", "content": answer})
+                    scratch.append({"role": "user", "content": self._call_check_nudge(skipped)})
+                    continue
+                if skipped:
+                    result.skipped = [t.name for t in skipped]
+                    result.notices += [self._skipped_notice(t) for t in skipped]
+                # Every call this turn succeeded and asked for a fixed reply ("Done."): that is the whole answer - the
+                # model's own words would only dress it up. Anything else (a failure, a status to read out) keeps them.
+                fixed = None if (final or worker) else self._fixed_reply(result)
+                result.answer = fixed or answer
                 result.terminated = final or 'answer'
                 if final:
                     result.notices.append(self._cap_notice(final, max_rounds))
@@ -878,10 +908,62 @@ class ToolStream(StreamBase):
             room = context_limit - self._prompt_tokens(scratch, defs) - max_response_tokens
             result_cap = self.result_cap_chars(room, len(calls))
             for call, parsed_call in zip(calls, parsed.calls):
+                replies_before = len(result.replies)
                 content = self._run_one_call(session, parsed_call["name"], parsed_call["arguments"], policy, taint,
                                              result, reason_used, max_response_tokens, turn_start, result_cap)
+                if len(result.replies) == replies_before:      # every path but a successful run leaves no reply
+                    result.replies.append(None)
                 scratch.append({"role": "tool", "tool_call_id": call["id"], "name": parsed_call["name"], "content": content})
                 pending.append(len(scratch) - 1)
+
+    @staticmethod
+    def _fixed_reply(result: LoopResult) -> Optional[str]:
+        """
+        The tools' own fixed reply, if this turn's calls all succeeded with one - else None.
+
+        Only when EVERY call gave one: a turn that also failed, was refused, or read something out (a status, the
+        weather) needs the model's words. Identical replies are said once ("Done.", not "Done. Done.").
+        """
+        if not result.replies or not all(result.replies) or result.shown_to_user:
+            return None
+        return " ".join(dict.fromkeys(result.replies))
+
+    # ------------------------------------------------------------------------------------------------ the call check
+
+    @staticmethod
+    def _skipped_tools(offered: List[Tools.Tool], request: str, result: LoopResult) -> List[Tools.Tool]:
+        """
+        The offered tools whose call_check matches the request but which this turn has neither run nor tried to run.
+
+        A tool that was refused or denied counts as tried: the user has already been told about that.
+
+        Args:
+            offered: The tools offered this round.
+            request: The user's request; empty means no check.
+            result: This loop's result so far (executed and refused names).
+        """
+        if not request:
+            return []
+        return [t for t in offered
+                if t.call_check and t.call_check.matches(request)
+                and t.name not in result.executed and t.name not in result.refused]
+
+    def _call_check_nudge(self, skipped: List[Tools.Tool]) -> str:
+        """The notice that asks the model to reconsider an answer given without the tools the request needs."""
+        names = " or ".join(f"'{t.name}'" for t in skipped)
+        return (f"{self.NOTICE_PREFIX} You answered without calling {names}, and the request looks like one for it. "
+                f"Nothing is changed or checked unless the tool is called, so your answer must never claim otherwise. "
+                f"If the user is asking for something {names} does, call it now. If not, give your answer again.")
+
+    @staticmethod
+    def _skipped_notice(tool: Tools.Tool) -> str:
+        """What the user is told when the model still did not call a tool its request needed."""
+        return tool.call_check.notice or f"The '{tool.name}' tool was not used, so nothing it handles was changed or checked."
+
+    @staticmethod
+    def _skipped_record(names: List[str]) -> str:
+        """The sentence saved after such an answer, so the history never shows a tool's work done without the tool."""
+        return f"No tool was called for this reply: {', '.join(names)} did not run, so nothing it handles was changed or checked."
 
     @classmethod
     def _is_pointer_only(cls, answer: str, player_name: str = '') -> bool:
@@ -1028,6 +1110,7 @@ class ToolStream(StreamBase):
         result.executed.append(name)
         if outcome.ok:
             taint.absorb(tool)
+            result.replies.append(outcome.reply)
             self._record(result, name, arguments, outcome.summary or outcome.content)
             if outcome.truncated:
                 result.notices.append(f"The result from '{name}' was too long and was shortened.")

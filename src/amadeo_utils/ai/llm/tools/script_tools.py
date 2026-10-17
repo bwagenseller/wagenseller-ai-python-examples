@@ -15,14 +15,15 @@ A tool script calls ``tool_script_main(DEFINITION, handler)``. It then supports:
   script.py --describe             prints its DEFINITION as JSON: name, description, parameters,
                                    its security flags and its timeout. The script declares its own
                                    flags, because whoever writes a tool is the one who knows it sends
-                                   data out or reads private data.
+                                   data out or reads private data. It may also carry a 'call_check'
+                                   (registry.CallCheck): patterns for requests it must handle.
   script.py --config FILE          runs one call. The ARGUMENTS arrive as JSON on stdin - never on
                                    the command line, where 'ps' would show them to every user on the
                                    machine. FILE is the tool's own config (API endpoints, home
                                    location...), kept in a config folder outside the repository.
 
-It answers on stdout with one JSON object: {"ok": true, "result": ..., "summary": "..."} (the
-summary optional - see ToolAnswer) or {"ok": false, "error": "..."}. A clean failure is ok=false with a message written for the model and the user; anything
+It answers on stdout with one JSON object: {"ok": true, "result": ..., "summary": "...", "reply": "..."}
+(summary and reply optional - see ToolAnswer) or {"ok": false, "error": "..."}. A clean failure is ok=false with a message written for the model and the user; anything
 else (a crash, a non-JSON answer, a non-zero exit) is reported as the tool failing.
 
 The server half, load_script_tool(), runs --describe once at startup and returns an ordinary
@@ -34,6 +35,7 @@ scripts can use it from any environment.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from typing import Any, Callable, Dict, Optional
@@ -52,11 +54,14 @@ class ToolAnswer:
         result: The full result, sent to the model this turn.
         summary (str): One line kept for later turns. For a tool with untrusted output, describe the result - a URL, a
             count - and never quote text from it.
+        reply (str | None): Optional fixed reply for the user ("Done.") when the call needs no explaining - see
+            registry.Summarized. Leave it out whenever something partly failed or a result must be read out.
     """
 
-    def __init__(self, result: Any, summary: str):
+    def __init__(self, result: Any, summary: str, reply: Optional[str] = None):
         self.result = result
         self.summary = summary
+        self.reply = reply
 
 
 # ------------------------------------------------------------------------------------------ script side
@@ -90,6 +95,8 @@ def tool_script_main(definition: Dict[str, Any], handler: Callable[[Dict[str, An
         produced = handler(arguments, config)
         if isinstance(produced, ToolAnswer):
             answer = {"ok": True, "result": produced.result, "summary": str(produced.summary)}
+            if produced.reply:
+                answer["reply"] = str(produced.reply)
         else:
             answer = {"ok": True, "result": produced}
     except ToolError as e:
@@ -133,7 +140,7 @@ def load_script_tool(python: str, script: str, config: Optional[str] = None):
     Raises:
         ValueError: if the script cannot describe itself, or describes itself inconsistently.
     """
-    from amadeo_utils.ai.llm.tools.registry import Tool, Summarized   # deferred: scripts import this module without the registry
+    from amadeo_utils.ai.llm.tools.registry import Tool, Summarized, CallCheck   # deferred: scripts import this module without the registry
 
     python, script = os.path.expanduser(python), os.path.expanduser(script)
     config = os.path.expanduser(config) if config else None
@@ -165,8 +172,8 @@ def load_script_tool(python: str, script: str, config: Optional[str] = None):
             raise RuntimeError(f"exited with code {finished.returncode} without a usable answer")
         if not answer.get("ok"):
             raise RuntimeError(answer.get("error") or "failed without saying why")
-        if answer.get("summary"):
-            return Summarized(answer.get("result"), answer["summary"])
+        if answer.get("summary") or answer.get("reply"):
+            return Summarized(answer.get("result"), answer.get("summary") or "", answer.get("reply"))
         return answer.get("result")
 
     flags = dict(definition.get("flags") or {})
@@ -175,6 +182,19 @@ def load_script_tool(python: str, script: str, config: Optional[str] = None):
                            "physical"}
     if unknown:
         raise ValueError(f"tool script [{script}] declares unknown flag(s) {sorted(unknown)}")
+
+    # Optional: {"patterns": [regex, ...], "notice": "..."} - see registry.CallCheck. Checked as strictly as the
+    # flags: a misspelt key or a bad regular expression stops the server instead of quietly disabling the check.
+    call_check = None
+    if definition.get("call_check"):
+        spec = definition["call_check"]
+        if not isinstance(spec, dict) or set(spec) - {"patterns", "notice"} or not isinstance(spec.get("patterns"), list):
+            raise ValueError(f"tool script [{script}] has a malformed call_check (want {{'patterns': [...], 'notice': '...'}})")
+        try:
+            call_check = CallCheck(patterns=[str(p) for p in spec["patterns"]], notice=str(spec.get("notice", "")))
+        except re.error as e:
+            raise ValueError(f"tool script [{script}] has a bad call_check pattern: {e}")
+
     # The registry's own timeout is the backstop; the subprocess timeout above is the one that fires and kills.
     return Tool(name=definition["name"], description=definition["description"], parameters=definition["parameters"],
-                function=run, timeout_s=timeout + 5, **flags)
+                function=run, timeout_s=timeout + 5, call_check=call_check, **flags)

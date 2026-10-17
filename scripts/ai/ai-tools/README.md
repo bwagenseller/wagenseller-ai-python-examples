@@ -150,6 +150,39 @@ The existing tools as worked examples:
   the one configured Home Assistant on the LAN. The model passes words, never an entity id; the
   tool resolves them and enforces its own allowlist (a Home Assistant token can do anything).
 
+#### Optional: a fixed reply ("Done.")
+
+For an action whose success needs no explaining, the handler can return `ToolAnswer(result, summary, reply="Done.")`.
+When **every** tool call in the turn succeeded with a reply, that reply *is* the answer: the model's own words
+("Ho ho ho! I have turned on both lamps!") are dropped. If anything in the turn had no reply, failed or was refused,
+the model answers as usual and explains. Give a reply only for a clean success: `home_control` leaves it out when a
+device was skipped or failed or a value was clamped, and for `status` / `list`, whose results must be read out.
+
+#### Optional: a call check
+
+A model will sometimes answer a request **without calling the tool it needs**: "the office lights are on!" with
+no call at all. Once one made-up answer is in its saved history, it copies it on later turns (seen live with
+`home_control`, 2026-10-17). A tool that does something the model could fake can declare `DEFINITION["call_check"]`:
+
+```python
+"call_check": {
+    "patterns": [r"\b(turn|switch)\w*(\W+\w+){0,5}?\W+(on|off)\b", r"\bthermostat\b"],   # regexes, case-insensitive
+    "notice": "Nothing in the house was changed or checked.",   # optional; told to the user
+},
+```
+
+When the user's request matches any pattern, the tool was offered, and the model answers without calling it,
+the loop asks the model **once** to reconsider. If it then calls the tool, nothing else happens. If it answers
+again without the tool, the answer goes through with the `notice` added (spoken as "Note: ..."), and the saved
+history says the tool did not run, so the made-up answer can't teach the next turn. The server log's `tool loop
+ended` line lists such tools under `skipped`.
+
+It is **not** a security flag: it changes nothing about which tools may run. A false match costs one extra
+generation, plus the notice if the model still answers without the tool. So keep the patterns to wording about
+what the tool does, and test them against everyday requests that should not match (see `home_control`'s, and
+`tests/llm/llama/agent/check_call_check.py`). A malformed `call_check` or a bad pattern stops the server at
+startup.
+
 ### 3. Follow the security rules
 
 * **Never a shell.** No `shell=True`, no `os.system`, no running a string the model wrote. If a
