@@ -19,6 +19,7 @@ fi
 run "tool-call parsers, every architecture"               "$PY" check_tool_parsers.py
 run "credential filter"                                    "$PY" check_secret_filter.py
 run "role-play / knowledge base cannot reach tools"        "$PY" check_tools_isolation.py
+run "physical tools: never in a worker, off after untrusted" "$PY" check_physical_flag.py
 run "approval protocol over TCP"                           "$PY" check_approval_protocol.py
 run "result cap shares the room left"                      "$PY" check_result_cap.py
 run "every tool config key reaches the server"             "$PY" check_tool_config_loader.py

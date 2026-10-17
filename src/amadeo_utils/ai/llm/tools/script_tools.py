@@ -171,7 +171,8 @@ def load_script_tool(python: str, script: str, config: Optional[str] = None):
 
     flags = dict(definition.get("flags") or {})
     # A typo in a flag name must stop the server, not silently leave the tool unflagged.
-    unknown = set(flags) - {"outbound", "private", "untrusted_output", "internal_commands", "needs_approval"}
+    unknown = set(flags) - {"outbound", "private", "untrusted_output", "internal_commands", "needs_approval",
+                           "physical"}
     if unknown:
         raise ValueError(f"tool script [{script}] declares unknown flag(s) {sorted(unknown)}")
     # The registry's own timeout is the backstop; the subprocess timeout above is the one that fires and kills.

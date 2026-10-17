@@ -3,7 +3,7 @@ Tool definitions, their security flags, and the policy that decides which tools 
 
 What this owns
 --------------
-A tool is a JSON-schema definition plus a Python function, with five security flags. Every
+A tool is a JSON-schema definition plus a Python function, with six security flags. Every
 rule about which tools are reachable - the server's allow-list, a session narrowing it, the
 routing of untrusted-output tools through 'delegate', and the two taint rules - is computed
 here from those flags, never from tool names, and never by asking the model.
@@ -19,13 +19,16 @@ The flags (CS-21, AGENTS.md decision 1)
   internal_commands - 'none' | 'read' | 'write': acts on the local machine.
   needs_approval    - the user must approve each call. Code-enforced floor: any 'write' tool
                       needs approval whatever this says.
+  physical          - the tool acts on the physical world (lights, locks, the house - CS-24). It
+                      never reaches a delegate worker, and is treated like internal_commands by the
+                      untrusted taint rule. It forces no approval.
 
 The taint rules
 ---------------
 Once a PRIVATE result is in a loop's context, no OUTBOUND tool may run (private data plus an
 outbound channel is how injected text exfiltrates). Once an UNTRUSTED result is in a loop's
-context, no INTERNAL_COMMANDS tool may run (untrusted text plus a local command is how injected
-text does damage). With the quarantine (see quarantine.py) untrusted text never reaches the
+context, no INTERNAL_COMMANDS or PHYSICAL tool may run (untrusted text plus a local command, or
+a garage door, is how injected text does damage). With the quarantine (see quarantine.py) untrusted text never reaches the
 main model in 'auto' or 'delegate' mode, so in practice these only bite in 'direct' mode and
 inside a worker.
 """
@@ -63,8 +66,8 @@ class Tool:
         parameters (dict): JSON schema of the arguments ('type': 'object', 'properties', 'required').
         function (Callable): Called with the arguments as keywords; returns a string, or anything
             JSON-serialisable, which is sent back to the model.
-        outbound, private, untrusted_output (bool), internal_commands (str), needs_approval (bool):
-            The security flags described in the module docstring.
+        outbound, private, untrusted_output (bool), internal_commands (str), needs_approval (bool),
+        physical (bool): The security flags described in the module docstring.
         timeout_s (float): How long the function may run before the call counts as failed.
     """
     name: str
@@ -76,11 +79,17 @@ class Tool:
     untrusted_output: bool = False
     internal_commands: str = INTERNAL_NONE
     needs_approval: bool = False
+    physical: bool = False
     timeout_s: float = 10.0
 
     def __post_init__(self):
         if self.internal_commands not in _INTERNAL_LEVELS:
             raise ValueError(f"tool {self.name}: internal_commands must be one of {_INTERNAL_LEVELS}")
+
+    @property
+    def acts_on_something(self) -> bool:
+        """True if the tool changes something outside the conversation: the local machine, or the house."""
+        return self.internal_commands != INTERNAL_NONE or self.physical
 
     @property
     def requires_approval(self) -> bool:
@@ -169,9 +178,11 @@ class ToolPolicy:
     def _base_tools(self) -> List[Tool]:
         """The tools this loop could ever be offered, before taint is applied."""
         if self.is_worker:
-            # A worker never sees private data (so nothing it reads can exfiltrate any) and never
-            # touches the local machine. It has no delegate or recall of its own: one level deep.
-            return [t for t in self._allowed_tools if not t.private and t.internal_commands == INTERNAL_NONE]
+            # A worker never sees private data (so nothing it reads can exfiltrate any), never
+            # touches the local machine and never acts on the house: it reads untrusted pages, and an
+            # injected "open the garage" must have nothing to reach. It has no delegate or recall of
+            # its own: one level deep.
+            return [t for t in self._allowed_tools if not t.private and not t.acts_on_something]
         if self.mode == MODE_DIRECT:
             return list(self._allowed_tools)
         if self.mode == MODE_DELEGATE:
@@ -210,7 +221,7 @@ class ToolPolicy:
         if taint.private:
             tools = [t for t in tools if not t.outbound]
         if taint.untrusted:
-            tools = [t for t in tools if t.internal_commands == INTERNAL_NONE]
+            tools = [t for t in tools if not t.acts_on_something]
         return tools
 
     def offered_names(self, taint: Taint) -> List[str]:
@@ -238,6 +249,8 @@ class ToolPolicy:
             return f"There is no tool called '{name}' available to you."
         if taint.private and tool.outbound:
             return f"'{name}' is disabled: private data is in this conversation and '{name}' sends data off this machine."
+        if tool.physical:
+            return f"'{name}' is disabled: this conversation has read untrusted content, and '{name}' acts on the house."
         return f"'{name}' is disabled: this conversation has read untrusted content, and '{name}' acts on this machine."
 
 

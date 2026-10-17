@@ -11,6 +11,7 @@ answer back to the model.
 | `web_search/` | Searches the web through a self-hosted SearXNG instance | outbound, untrusted_output |
 | `fetch_url/` | Fetches one public web page and returns its readable text | outbound, untrusted_output |
 | `get_grades/` | Grades and assignments from Infinite Campus (wraps `scripts/tools/infinite_campus/`) | private |
+| `home_control/` | Lights, switches, fans, covers and the thermostat through Home Assistant; status of any device | physical |
 
 Two tools are built into the server rather than living here: `get_datetime` and `calculator`
 (`src/amadeo_utils/ai/llm/tools/builtin_tools.py`). `delegate` and `recall` are part of the
@@ -135,6 +136,7 @@ server at startup, so a typo cannot leave a tool unflagged.
 | `untrusted_output` | the **result** is text a third party wrote (web pages, search snippets) - it may carry prompt injection | In the default `auto` mode, the tool is reachable **only through `delegate`**: a separate worker reads the untrusted text, and only its final answer is shown to the user - it never enters the main model's context. |
 | `internal_commands` | the tool acts on the local machine: `"none"` (default), `"read"` or `"write"` | Disabled once untrusted text has reached the model (`direct` mode). A `"read"` tool can surface private data, so flag it `private` too. |
 | `needs_approval` | a person should confirm each call | The user is asked (y/n) with the exact tool name and arguments before it runs; no answer means no. **`"write"` tools always need approval, whatever the flags say.** |
+| `physical` | the tool acts on the physical world - lights, locks, the house | Never offered to a `delegate` worker (it reads untrusted pages; an injected "open the garage" must have nothing to reach). Disabled once untrusted text has reached the model (`direct` mode), like `internal_commands`. Forces **no** approval: put the limits in the tool itself (see `home_control`'s rules). |
 
 The existing tools as worked examples:
 
@@ -144,6 +146,9 @@ The existing tools as worked examples:
   and anyone can write the page.
 * `get_grades` - **private**, *not* outbound: the model only picks a term and a number of days,
   and the request always goes to the one configured site.
+* `home_control` - **physical**, nothing else: it changes things in the house, but always through
+  the one configured Home Assistant on the LAN. The model passes words, never an entity id; the
+  tool resolves them and enforces its own allowlist (a Home Assistant token can do anything).
 
 ### 3. Follow the security rules
 

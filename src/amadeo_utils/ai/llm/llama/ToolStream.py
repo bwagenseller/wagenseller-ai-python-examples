@@ -360,7 +360,7 @@ class ToolStream(StreamBase):
         for entry in self.argsDict.get('script_tools', []):
             tool = load_script_tool(entry['python'], entry['script'], entry.get('config'))
             registry.register(tool)
-            logger.info(f"{ColoredText.BLUE_TEXT}ToolStream: loaded script tool [{tool.name}] (outbound={tool.outbound}, private={tool.private}, untrusted_output={tool.untrusted_output}, internal_commands={tool.internal_commands}).{ColoredText.END_TEXT}")
+            logger.info(f"{ColoredText.BLUE_TEXT}ToolStream: loaded script tool [{tool.name}] (outbound={tool.outbound}, private={tool.private}, untrusted_output={tool.untrusted_output}, internal_commands={tool.internal_commands}, physical={tool.physical}).{ColoredText.END_TEXT}")
         return registry
 
     # ------------------------------------------------------------------------------------------------------ sessions
