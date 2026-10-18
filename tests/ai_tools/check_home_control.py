@@ -6,7 +6,8 @@ What it proves
 * The tool describes itself as 'physical' only (not outbound, private, untrusted_output or internal_commands),
   and the server's loader accepts that flag.
 * Resolution: exact name, alias, area (by name, by alias, with and without a kind word, "all the lights"), fuzzy
-  for a misspelling; an ambiguous name and an unknown one are errors naming the candidates, and nothing is called.
+  for a misspelling; an ambiguous name and an unknown one are normal results (needs_choice) naming the candidates, so no failure notice
+  is spoken, and nothing is called.
 * The skips: a hidden switch (the original behind "Show as light") never doubles a match; disabled, config and
   alexa_media entities and 'exclude' entries are unreachable, even by name.
 * The rules: locks, alarm panels and non-window covers are refused unless listed; listed ones work; a window
@@ -115,17 +116,27 @@ def run_checks(work, ha):
     ok, res, _, calls = call({"action": "turn_on", "target": "kitchen cieling"})
     check(ok and ids(calls) == ["light.kitchen_ceiling"], "fuzzy match for a misspelling", f"{res} {calls}")
     ok, res, _, calls = call({"action": "turn_on", "target": "reading lamp"})
-    check(not ok and "Reading Lamp (Den)" in res and "Reading Lamp (Porch)" in res and not calls,
-          "ambiguous name -> error naming both, nothing called", res)
+    check(ok and res.get("needs_choice") and res.get("close_matches") == ["Reading Lamp (Den)", "Reading Lamp (Porch)"]
+          and not calls, "ambiguous name -> a needs_choice result naming both (not a failure), nothing called", res)
     ok, res, _, calls = call({"action": "turn_on", "target": "hot tub"})
-    check(not ok and "nothing is called" in res and not calls, "unknown name -> error, nothing called", res)
+    check(ok and res.get("needs_choice") and "nothing is called" in res.get("message", "") and not calls,
+          "unknown name -> a needs_choice result (not a failure), nothing called", res)
+    check(R.execute(tool, {"action": "turn_on", "target": "hot tub"}, 20000).reply is None,
+          "...with no fixed reply, so the model asks in its own words")
     ok, res, _, calls = call({"action": "turn_on"})
     check(not ok and "target is required" in res and not calls, "missing target -> error", res)
 
     print("== skipped and excluded entities")
+    def unreachable(ok, res, target):
+        """Not found (a failure, or a needs_choice result) - and the hidden entity is not offered as a close match."""
+        if not ok:
+            return True
+        offered = [m.split(" (")[0].lower() for m in res.get("close_matches", [])]
+        return bool(res.get("needs_choice")) and target not in offered
+
     for target in ("server power", "kitchen speaker do not disturb", "kitchen old plug", "kitchen firmware beta"):
         ok, res, _, calls = call({"action": "turn_off", "target": target})
-        check(not ok and not calls, f"unreachable by name: {target}", f"{res} {calls}")
+        check(unreachable(ok, res, target) and not calls, f"unreachable by name: {target}", f"{res} {calls}")
 
     print("== the rules")
     ok, res, _, calls = call({"action": "unlock", "target": "front door"})
@@ -197,7 +208,7 @@ def run_checks(work, ha):
     check(reply({"action": "turn_off", "target": "kitchen lights"}) == "Done.", "clean area success -> 'Done.'")
     check(reply({"action": "open", "target": "garage"}) is None, "an area with a skipped device -> no fixed reply")
     check(reply({"action": "set_level", "target": "den fan", "level": 250}) is None, "a clamped value -> no fixed reply")
-    check(reply({"action": "turn_on", "target": "hot tub"}) is None, "a failure -> no fixed reply")
+    check(reply({"action": "turn_on", "target": "hot tub"}) is None, "an unknown name -> no fixed reply")
     check(reply({"action": "status", "target": "front door"}) is None, "status -> no fixed reply (it must be read out)")
     check(reply({"action": "list"}) is None, "list -> no fixed reply")
 
@@ -214,7 +225,7 @@ def run_checks(work, ha):
     ok, res, _, _ = call({"action": "status", "target": "attic"})
     check(ok and [d["name"] for d in res["devices"]] == ["Attic Leak"], "status of a sensor-only room", res)
     ok, res, _, _ = call({"action": "status", "target": "server power"})
-    check(not ok, "status cannot read an excluded entity", res)
+    check(unreachable(ok, res, "server power") and "devices" not in res, "status cannot read an excluded entity", res)
     ok, res, _, calls = call({"action": "list"})
     rooms = res["rooms"] if ok else {}
     names = {i["name"]: i for items in rooms.values() for i in items}

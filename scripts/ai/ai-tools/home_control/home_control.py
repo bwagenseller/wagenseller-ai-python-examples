@@ -19,8 +19,8 @@ and resolves the words here, against what the rules below allow:
                     do, the devices that can ("open the garage" means its covers);
   4. fuzzy        - the closest name (difflib), only when it is clearly the best one.
 
-An ambiguous target, or one that matches nothing, is a ToolError naming the close candidates, so the model can ask
-"the kitchen ceiling light or the kitchen lamp?".
+An ambiguous target, or one that matches nothing, is a normal result (not an error) naming the close candidates, so
+the model can ask "the kitchen ceiling light or the kitchen lamp?" - and the server adds no "the tool failed" notice.
 
 Skipped before matching: entities that are hidden or disabled (a switch shown as a light hides the original
 switch, which would otherwise match twice), config/diagnostic entities, the platforms in 'skip_platforms' (by
@@ -136,7 +136,7 @@ DEFINITION = {
                    "dims lights, opens or closes covers (blinds, garage doors), sets the thermostat, and reports the "
                    "state of devices and sensors. Pass the device or room in the user's own words (\"kitchen lights\", "
                    "\"the basement\", \"thermostat\"); never guess an entity id. Use action 'list' to see what can be "
-                   "controlled. If the target is ambiguous the error lists candidates: ask the user which one. "
+                   "controlled. If the target is ambiguous or unknown the result lists candidates: ask the user which one. "
                    "This tool is the only way to control or check a device: always call it for any request about "
                    "lights, switches, plugs, fans, doors or the thermostat, and never say a device changed (or "
                    "exists) unless this tool reported it.",
@@ -235,6 +235,24 @@ def id_set(config: Dict[str, Any], key: str) -> set:
 
 
 # ------------------------------------------------------------------------------------------ the house model
+
+class NeedsChoice(ToolError):
+    """
+    The target did not name exactly one thing: nothing matched, or several did. Not a failure - the user just has to
+    say which. handle() turns it into a normal result, so the model asks in its own words and the server adds no
+    spoken "the tool failed" notice (live, 2026-10-17: the notice read out "Ask the user which one." to the user).
+    Subclasses ToolError so any path that does not catch it still fails safely, as before.
+
+    Attributes:
+        target (str): The words the model passed.
+        candidates (list[str]): Close matches, as labels; empty if there are none.
+    """
+
+    def __init__(self, message: str, target: str, candidates: Optional[List[str]] = None):
+        super().__init__(message)
+        self.target = target
+        self.candidates = candidates or []
+
 
 def normalise(text: str) -> str:
     """Lower case, apostrophes dropped ("Brent's" -> "brents"), punctuation to spaces, single spaces."""
@@ -386,7 +404,7 @@ class House:
                 only: a SmartThings garage door is both a cover and a binary_sensor called "Third Bay Door".
 
         Raises:
-            ToolError: nothing matched, or several devices share the name - naming the candidates.
+            NeedsChoice: nothing matched, or several devices share the name - naming the candidates.
         """
         wanted = normalise(target)
         if not wanted:
@@ -400,7 +418,8 @@ class House:
                 if len(hits) == 1 or (hits and allow_many):
                     return Match(hits, None, None)
                 if len(hits) > 1:
-                    raise ToolError(f"'{target}' could mean {self._list(hits)}. Ask the user which one.")
+                    raise NeedsChoice(f"'{target}' could mean {self._list(hits)}. Ask the user which one.", target,
+                                      self._labels(hits))
 
         area_hit = self.area_target(wanted, area_domains)
         if area_hit is not None:
@@ -438,7 +457,7 @@ class House:
         where = area or "the house"
         if not members:
             what = f"{kind.replace('_', ' ')}s" if kind else "devices of that kind"
-            raise ToolError(f"there are no {what} in {where}")
+            raise NeedsChoice(f"there are no {what} in {where}", wanted)
         return Match(members, where, kind)
 
     def _fuzzy(self, target: str, wanted: str, pool: List[Entity]) -> Entity:
@@ -452,17 +471,23 @@ class House:
             return scored[0][1]
         close = [e for score, e in scored[:5] if score >= FUZZY_SUGGEST]
         if close:
-            raise ToolError(f"nothing is called '{target}'. Close matches: {self._list(close)}. Ask the user which one.")
-        raise ToolError(f"nothing is called '{target}', and no room has that name. Use action 'list' to see what "
-                        "can be controlled.")
+            raise NeedsChoice(f"nothing is called '{target}'. Close matches: {self._list(close)}. Ask the user which "
+                              "one.", target, self._labels(close))
+        raise NeedsChoice(f"nothing is called '{target}', and no room has that name. Use action 'list' to see what "
+                          "can be controlled.", target)
 
     @staticmethod
-    def _list(entities: List[Entity]) -> str:
-        """'A (Kitchen), B (Office) or C' for an error message; the kind is added where two labels are the same."""
+    def _labels(entities: List[Entity]) -> List[str]:
+        """Each entity's label - 'Name (Area)' - with the kind added where two labels are the same."""
         labels = [e.label() for e in entities]
-        labels = [f"{label[:-1]}, {e.domain.replace('_', ' ')})" if labels.count(label) > 1 and label.endswith(")")
-                  else f"{label} ({e.domain.replace('_', ' ')})" if labels.count(label) > 1 else label
-                  for label, e in zip(labels, entities)]
+        return [f"{label[:-1]}, {e.domain.replace('_', ' ')})" if labels.count(label) > 1 and label.endswith(")")
+                else f"{label} ({e.domain.replace('_', ' ')})" if labels.count(label) > 1 else label
+                for label, e in zip(labels, entities)]
+
+    @classmethod
+    def _list(cls, entities: List[Entity]) -> str:
+        """'A (Kitchen), B (Office) or C' for a message to the model."""
+        labels = cls._labels(entities)
         return labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " or " + labels[-1]
 
 
@@ -697,6 +722,13 @@ def handle(arguments: Dict[str, Any], config: Dict[str, Any]):
             if not calls:
                 raise ToolError(f"nothing was changed: {'; '.join(skipped)}")
             return run_calls(ha, calls, action, area, skipped, arguments)
+    except NeedsChoice as e:
+        # A question for the user, not a failure: a normal result (no fixed reply), so the model asks in its own words.
+        result = {"needs_choice": True, "target": e.target, "message": str(e)}
+        if e.candidates:
+            result["close_matches"] = e.candidates
+        return ToolAnswer(result, f"no single match for '{e.target}'" +
+                          (f"; close: {', '.join(e.candidates)}" if e.candidates else ""))
     except HomeAssistantError as e:
         raise ToolError(f"Home Assistant: {e}")
 
