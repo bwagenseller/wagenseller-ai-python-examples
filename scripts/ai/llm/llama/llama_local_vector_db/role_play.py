@@ -13,6 +13,7 @@ try:
 except ImportError:
     pass
 import getpass
+from amadeo_utils.misc_utils.process_protection import protect_process_memory
 
 # IMPORTANT: llama_utils MUST be imported before llama_cpp. Importing llama_cpp loads the llama.cpp shared library,
 # which registers its GGML CUDA backend and pins the device ordering for the life of the process; llama_utils sets
@@ -172,9 +173,16 @@ class RolePlay:
         self.embedding_gpu_lock = threading.Lock()
 
         if self.argsDict['encrypted']:
+            # Before the passphrase exists in memory: no core dump, no same-user memory reads (CS-25).
+            protect_process_memory()
             self.passphrase = getpass.getpass("🔑 Enter conversation passphrase: ")
         else:
             self.passphrase = ""
+
+        # An encrypted system prompt was deferred when the config was read (there was no passphrase yet); decrypt it
+        # now, in memory. A missing or wrong passphrase raises here rather than quietly using a different prompt.
+        if self.argsDict['system_message'] is None:
+            self.argsDict['system_message'] = LlamaUtils.get_system_message(self.argsDict['system_prompt_file'], passphrase=self.passphrase)
 
         # Initialize db
         self.db = VectorDB(self.llm_embedder, self.embedding_gpu_lock, self.llm_generator, self.generating_gpu_lock, self.model_type, self.argsDict['convo_dir'], self.argsDict['debug'], self.passphrase)

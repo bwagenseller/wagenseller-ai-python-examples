@@ -1,6 +1,7 @@
 import os
 import logging
 import getpass
+from amadeo_utils.misc_utils.process_protection import protect_process_memory
 
 # IMPORTANT: llama_utils MUST be imported before anything that pulls in llama_cpp - which now includes StreamBase,
 # since the base class loads the models. Importing llama_cpp loads the llama.cpp shared library, which registers its
@@ -85,6 +86,8 @@ class RolePlayStream(StreamBase):
 
         """
         if self.argsDict['encrypted']:
+            # Before the passphrase exists in memory: no core dump, no same-user memory reads (CS-25).
+            protect_process_memory(logger.warning)
             self.passphrase = getpass.getpass("\U0001F511 Enter conversation passphrase: ")
         else:
             self.passphrase = ""
@@ -129,7 +132,15 @@ class RolePlayStream(StreamBase):
                 self.sessions[session_id]['db'] = VectorDB(self.llm_embedder, self.embedding_gpu_lock, self.llm_generator, self.generating_gpu_lock, self.model_type, self.sessions[session_id]['convo_dir'], self.argsDict['debug'], self.passphrase)
                 self.sessions[session_id]['chat_history'] = []
 
-                system_message = LlamaUtils.get_system_message(prompt_path) if prompt_path else LlamaUtils.BASE_SYSTEM_MESSAGE
+                # An encrypted prompt ('<id>.txt.enc') is decrypted in memory with the conversation passphrase (CS-25). If
+                # that fails the session is refused below, rather than run on the default prompt in its place.
+                prompt_error = ''
+                try:
+                    system_message = LlamaUtils.get_system_message(prompt_path, logger.info, self.passphrase) if prompt_path else LlamaUtils.BASE_SYSTEM_MESSAGE
+                except (OSError, ValueError) as e:
+                    logger.error(f"{ColoredText.RED_TEXT}RolePlayStream.create_session: {e}{ColoredText.END_TEXT}")
+                    system_message = LlamaUtils.BASE_SYSTEM_MESSAGE
+                    prompt_error = ' system_prompt_id could not be decrypted.'
 
                 if not player_name:
                     # If there is no given player name, take the line out of the system prompt that identifies the player
@@ -148,6 +159,7 @@ class RolePlayStream(StreamBase):
                     self.sessions[session_id]['fatal_errors'] += ' user_id is invalid.'
                 if not system_prompt_id or not prompt_path:
                     self.sessions[session_id]['fatal_errors'] += ' system_prompt_id is invalid.'
+                self.sessions[session_id]['fatal_errors'] += prompt_error
 
                 # Create the lock for this session
                 self.session_locks[session_id] = threading.Lock()

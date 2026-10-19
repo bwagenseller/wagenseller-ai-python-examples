@@ -58,6 +58,15 @@ class VectorDB:
         if self.passphrase:
             if salt_path is None:
                 salt_path = os.path.join(self.save_dir, 'convo.salt')
+            # AmadeoEncryption creates a salt when there is none. That is right for a new conversation, but if
+            # encrypted files already exist their salt has been lost or moved: a new one could never decrypt them, would
+            # be reported as an "incorrect passphrase", and would sit where the original must be restored. Refuse, and
+            # name the missing file instead (CS-25).
+            if not os.path.exists(salt_path):
+                existing = [f for f in (self.vector_db_file, self.chat_history_file) if os.path.exists(f)]
+                if existing:
+                    raise ValueError(f"Salt file '{salt_path}' is missing, but encrypted conversation files exist ({', '.join(os.path.basename(f) for f in existing)}). "
+                                     f"Restore the original salt file; a new one cannot decrypt them.")
             self.encryption = AmadeoEncryption(self.passphrase, salt_path=salt_path)
 
         if self.passphrase:

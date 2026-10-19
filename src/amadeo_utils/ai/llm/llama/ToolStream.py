@@ -6,6 +6,7 @@ import time
 import socket
 import struct
 import getpass
+from amadeo_utils.misc_utils.process_protection import protect_process_memory
 import logging
 import threading
 from dataclasses import dataclass, field, asdict
@@ -339,9 +340,17 @@ class ToolStream(StreamBase):
             logger.warning(f"{ColoredText.YELLOW_TEXT}ToolStream: architecture [{ChatTemplate.model_architecture(self.llm_generator)}] has no tool-call parser; tools are disabled for this model.{ColoredText.END_TEXT}")
 
         if self.argsDict.get('encrypted'):
+            # Before the passphrase exists in memory: no core dump, no same-user memory reads (CS-25). Tool scripts
+            # run as subprocesses are not covered (the flag resets on exec), but they are never given the passphrase.
+            protect_process_memory(logger.warning)
             self.passphrase = getpass.getpass("\U0001F511 Enter conversation passphrase: ")
         else:
             self.passphrase = ""
+
+        # The default prompt, if encrypted, was deferred when the config was read; decrypt it now, in memory. A missing
+        # or wrong passphrase stops the server here rather than letting it answer with a different prompt.
+        if self.argsDict['system_message'] is None:
+            self.argsDict['system_message'] = LlamaUtils.get_system_message(self.argsDict['system_prompt_file'], logger.info, passphrase=self.passphrase)
 
         self.system_message = self.argsDict['system_message'] + ToolStream.MAIN_TOOL_RULES
         with self.generating_gpu_lock:
@@ -471,7 +480,8 @@ class ToolStream(StreamBase):
         * No prompt folder configured (system_prompt_dir), or no id sent: the server's own prompt
           (default_system_prompt_file in the config; argsDict['system_prompt_file'] internally).
           An id sent to a server without a folder is ignored, so older clients and configs keep working.
-        * '<system_prompt_dir>/<id>.txt' if it exists.
+        * '<system_prompt_dir>/<id>.txt' if it exists, else '<id>.txt.enc' decrypted in memory with the conversation
+          passphrase (CS-25). One that cannot be decrypted fails the session.
         * 'default' with no default.txt in the folder: the server's own prompt.
         * Anything else - an unsafe id (a path, '..'), or an id with no file - is an error, which fails the session
           rather than quietly answering with a different prompt than the one asked for.
@@ -494,10 +504,12 @@ class ToolStream(StreamBase):
             path = LlamaUtils.safe_prompt_path(prompt_dir, prompt_id)
             if path is None:
                 return failed + ("system_prompt_id is invalid (it must be a plain name such as 'voice').",)
-            if os.path.isfile(path):
+            if LlamaUtils.find_prompt_file(path):
                 try:
-                    raw, key = LlamaUtils.load_system_prompt(path), prompt_id
-                except OSError as e:
+                    raw, key = LlamaUtils.load_system_prompt(path, logger.info, self.passphrase), prompt_id
+                except (OSError, ValueError) as e:
+                    # The detail (which file, wrong passphrase or missing salt) goes to the server log only.
+                    logger.error(f"{ColoredText.RED_TEXT}ToolStream.resolve_system_prompt: {e}{ColoredText.END_TEXT}")
                     return failed + (f"system_prompt_id '{prompt_id}' could not be read ({type(e).__name__}).",)
             elif prompt_id != 'default':
                 return failed + (f"system_prompt_id '{prompt_id}' has no prompt on this server.",)
@@ -1381,6 +1393,8 @@ class ToolStream(StreamBase):
           tool_audit_log          str   - opt-in audit file; unset or "" writes nothing. No default location.
           base_convo_dir          str   - where saved conversations go (only when a client asks to save).
           encrypted               bool  - prompt for a passphrase and encrypt saved conversations. Default false.
+                                          The same passphrase decrypts any prompt stored as '<name>.txt.enc'
+                                          (in memory; salt 'amadeo.salt' beside it). Plaintext prompts need neither.
 
         The system half is shared with the knowledge-base server through LlamaUtils.SERVER_SYSTEM_REQUIRED_FIELDS /
         SERVER_SYSTEM_OPTIONAL_FIELDS / map_server_system_config, including its field-type validation.
@@ -1427,7 +1441,8 @@ class ToolStream(StreamBase):
         except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.error(f"{ColoredText.RED_TEXT}ToolStream.get_args_dict: could not load [{args.json}]: {type(e).__name__}: {e}{ColoredText.END_TEXT}")
             return {}
-        argsDict['system_message'] = LlamaUtils.get_system_message(argsDict['system_prompt_file'], logger.info)
+        # An encrypted default prompt comes back as None here; post_model_init decrypts it once it has the passphrase.
+        argsDict['system_message'] = LlamaUtils.get_system_message(argsDict['system_prompt_file'], logger.info, defer_encrypted=True)
         return argsDict
 
     # Config keys the agent server renamed: old name -> new name. A config still using an old name is refused with a

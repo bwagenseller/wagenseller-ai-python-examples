@@ -27,12 +27,18 @@ python amadeo_encryption.py decrypt encrypted_doc.bin document.pdf --salt /secur
 
 # Short flag
 python amadeo_encryption.py encrypt doc.pdf -s /path/to.salt
+
+# Encrypt a llama.cpp system prompt (CS-25) so role-play / the agent server can read it: name the output
+# '<name>.txt.enc' and keep the default salt ('amadeo.salt' in the prompt folder). Use the conversation passphrase,
+# then delete the plaintext voice.txt - while it exists it is used instead of the encrypted copy.
+python amadeo_encryption.py encrypt /path/to/prompts/voice.txt /path/to/prompts/voice.txt.enc
 """
 
 import sys
 import os
 import getpass
 from amadeo_utils.misc_utils.FileEncryption import AmadeoEncryption
+from amadeo_utils.misc_utils.process_protection import protect_process_memory
 
 
 def get_passphrase(confirm: bool = False) -> str:
@@ -130,6 +136,9 @@ def main():
     else:
         print(f"📋 Will create salt file: {salt_path}")
     
+    # Before the passphrase (and any plaintext) exists in memory: no core dump, no same-user memory reads (CS-25).
+    protect_process_memory()
+
     # Get passphrase (with confirmation for encryption)
     print()
     passphrase = get_passphrase(confirm=(command == 'encrypt'))

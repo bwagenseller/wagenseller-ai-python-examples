@@ -99,6 +99,25 @@ class LlamaUtils:
     # THREAD_COUNT = 8 #-1 means 'use all cores', 0 means default (Llama finds the number of threads to half of the number of CPU cores)
 
 
+    @staticmethod
+    def str_to_bool(value) -> bool:
+        """
+        An argparse 'type' for true/false flags. argparse's own 'type=bool' calls bool() on the string, so any non-empty
+        value - including '--encrypted False' - came out True.
+
+        :param value: The text from the command line (or an actual bool, for a default).
+        :return: True for true/yes/y/1/on, False for false/no/n/0/off (any case).
+        :raises argparse.ArgumentTypeError: For anything else.
+        """
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in ('true', 'yes', 'y', '1', 'on'):
+            return True
+        if text in ('false', 'no', 'n', '0', 'off'):
+            return False
+        raise argparse.ArgumentTypeError(f"expected true or false, not '{value}'")
+
     # A name a CLIENT chooses that the server turns into part of a path (a system prompt id, a user id): letters, digits,
     # space, '_', '-', '.', starting with a letter or digit, and never '..'. Anything else - '../../etc/x', '/abs', 'a/b'
     # - is refused rather than cleaned up, so a bad name fails loudly instead of quietly meaning something else.
@@ -130,23 +149,112 @@ class LlamaUtils:
 
     ################################################################################################################### Loading System Prompt ####################################################################################################################
 
-    def load_system_prompt(filepath: str, log_func: Callable[[str], None] = print):
+    # Encrypted system prompts (CS-25). Encryption is OPTIONAL: a plain '<name>.txt' works exactly as it always has.
+    # An encrypted prompt is the same file run through scripts/utils/amadeo_encryption.py - '<name>.txt.encrypted' by
+    # that script's default, renamed to '<name>.txt.enc' to match the '.enc' history files - and it is decrypted in
+    # memory only; the plaintext never touches the disk. The key comes from the conversation passphrase (the same one
+    # 'encrypted' already asks for) and the salt file beside the prompt, 'amadeo.salt' - again the script's default, so
+    # encrypting a prompt in place needs no extra flags.
+    ENCRYPTED_PROMPT_SUFFIX = ".enc"
+    PROMPT_SALT_FILENAME = "amadeo.salt"
+
+    # Key derivation (Argon2id, ~100 MiB) is deliberately slow, and a server reads a prompt per session; each derived
+    # cipher is kept here, keyed by (salt file, passphrase), so it is paid once per process rather than once per session.
+    _prompt_cipher_cache = {}
+
+    @staticmethod
+    def find_prompt_file(filepath: str) -> Optional[str]:
         """
-        Loads the entire content of a file into a single string.
+        The prompt file that 'filepath' actually refers to, or None if there is none.
+
+        The path as named wins; failing that, its encrypted twin ('<filepath>.enc') is used. So a config, or a client's
+        system_prompt_id, can keep naming 'voice.txt' after the prompt has been replaced by 'voice.txt.enc'.
+
+        :param filepath: The prompt file as configured or built from a system_prompt_id.
+        :return: The existing file - filepath or filepath + '.enc' - or None.
+        """
+        if not filepath:
+            return None
+        if os.path.isfile(filepath):
+            return filepath
+        encrypted = filepath + LlamaUtils.ENCRYPTED_PROMPT_SUFFIX
+        if os.path.isfile(encrypted):
+            return encrypted
+        return None
+
+    @staticmethod
+    def is_encrypted_prompt(filepath: str) -> bool:
+        """
+        True if 'filepath' resolves (see find_prompt_file) to an encrypted prompt - one ending in '.enc'.
+        """
+        found = LlamaUtils.find_prompt_file(filepath)
+        return found is not None and found.endswith(LlamaUtils.ENCRYPTED_PROMPT_SUFFIX)
+
+    @staticmethod
+    def decrypt_prompt(filepath: str, passphrase: str) -> str:
+        """
+        Decrypts an encrypted prompt file in memory and returns its text. Nothing is written to disk.
 
         Args:
-            filepath (str): The path to the file to be loaded.
+            filepath (str): The encrypted file ('.enc').
+            passphrase (str): The conversation passphrase.
+
+        Returns:
+            str: The decrypted prompt.
+
+        Raises:
+            ValueError: No passphrase was given, or the passphrase / salt does not match the file.
+            FileNotFoundError: The salt file beside the prompt is missing - without it the key cannot be rebuilt, and a
+                new salt must NOT be generated here (AmadeoEncryption would do so silently).
+        """
+        if not passphrase:
+            raise ValueError(f"the system prompt '{filepath}' is encrypted, but no passphrase was given - set 'encrypted' to true so the passphrase is asked for.")
+        salt_path = os.path.join(os.path.dirname(os.path.abspath(filepath)), LlamaUtils.PROMPT_SALT_FILENAME)
+        if not os.path.isfile(salt_path):
+            raise FileNotFoundError(f"the system prompt '{filepath}' is encrypted, but its salt file '{salt_path}' is missing.")
+
+        # Imported here rather than at the top so that plaintext-only setups never need the 'cryptography' package.
+        from cryptography.fernet import InvalidToken
+        from amadeo_utils.misc_utils.FileEncryption import AmadeoEncryption
+
+        cache_key = (salt_path, passphrase)
+        cipher = LlamaUtils._prompt_cipher_cache.get(cache_key)
+        if cipher is None:
+            cipher = AmadeoEncryption(passphrase, salt_path=salt_path)
+            LlamaUtils._prompt_cipher_cache[cache_key] = cipher
+        try:
+            return cipher.load_and_decrypt(filepath, return_type='str')
+        except InvalidToken:
+            raise ValueError(f"could not decrypt the system prompt '{filepath}' - wrong passphrase, a different salt file, or a corrupted file.") from None
+
+    @staticmethod
+    def load_system_prompt(filepath: str, log_func: Callable[[str], None] = print, passphrase: str = ""):
+        """
+        Loads the entire content of a prompt file into a single string, decrypting it in memory if it is encrypted.
+
+        Args:
+            filepath (str): The path to the file to be loaded. If it does not exist but '<filepath>.enc' does, that is
+                loaded instead (see find_prompt_file).
             log_func (Callable): The function that prints whatever we are targeting. This will usually be 'print' or some form of 'logger.info'. 'logger'error' etc.
+            passphrase (str): The conversation passphrase; only needed, and only used, for an encrypted prompt.
 
         Returns:
             str: The entire content of the file as a single string. Returns an empty string if the file is empty.
 
         Raises:
-            FileNotFoundError: If the specified file does not exist.
+            FileNotFoundError: If neither the file nor its encrypted twin exists, or an encrypted prompt's salt is missing.
+            ValueError: If the prompt is encrypted and the passphrase is missing or wrong.
             IOError: For other input/output errors (e.g., permissions).
         """
+        found = LlamaUtils.find_prompt_file(filepath)
+        if found is not None and found.endswith(LlamaUtils.ENCRYPTED_PROMPT_SUFFIX):
+            # A plaintext copy beside the encrypted one would win (the path as named comes first), so reaching here
+            # means there is none - good.
+            return LlamaUtils.decrypt_prompt(found, passphrase)
+        if found is not None and os.path.isfile(found + LlamaUtils.ENCRYPTED_PROMPT_SUFFIX):
+            log_func(f"{ColoredText.YELLOW_TEXT}LlamaUtils.load_system_prompt: both '{found}' and its encrypted copy exist; the plaintext one is used. Delete it if the prompt is meant to be encrypted.{ColoredText.END_TEXT}")
         try:
-            with open(filepath, 'r', encoding='utf-8') as file:
+            with open(found or filepath, 'r', encoding='utf-8') as file:
                 content = file.read()
             return content
         except FileNotFoundError:
@@ -422,7 +530,7 @@ class LlamaUtils:
         parser.add_argument("-obcd", "--override-base-convo-dir", action='store_true',help="Do you want to use the override base directory? This is a second directory that is immutable and is meant for temporary conversation storage")
         parser.add_argument("-spf", "--system-prompt-file", default=SubjectiveConstants.SYSTEM_PROMPT_FILE,help="A filename (full, absolute path to the file) that contains your system prompt; this is a text file. This is the initial message you send to the LLM to 'set the tone' of the entire conversation. This is critical! Be creative!")
 
-        parser.add_argument("-en", "--encrypted", type=bool,default=False, help="Is the conversation history encrypted? If set to true, you will have to enter a passphrase.")
+        parser.add_argument("-en", "--encrypted", type=LlamaUtils.str_to_bool, default=False, help="Is the conversation history (and an encrypted system prompt) encrypted? If set to true, you will have to enter a passphrase.")
 
         parser.add_argument("-rpcj", "--role-play-config-json", type=str, default="", help="If this points to a valid JSON file, the ROLE-PLAY parameters (the player name, conversation directory, system prompt file, encryption, and debug) are pulled from that file, and the defaults - and the matching arguments passed from the command line - are ignored. If the JSON load fails for whatever reason, though, the defaults WILL be engaged for the role-play parameters. This is loaded independently of '--system-config-json'.")
 
@@ -445,7 +553,7 @@ class LlamaUtils:
         parser.add_argument("-bcd", "--base-convo-dir", default=SubjectiveConstants.BASE_CONVO_DIR,help="The base directory where all conversation histories are stored. Each session gets its own directory beneath this one, named for the user and the system prompt it is using.")
         parser.add_argument("-spf", "--system-prompt-dir", default=SubjectiveConstants.SYSTEM_PROMPT_DIR,help="A directory that contains system prompt files; this is just the directory, but the prompts themselves are in text files in this directory. A client picks one by sending its 'system_prompt_id', which is matched against the filename (minus the '.txt'). These files represent the initial message you send to the LLM to 'set the tone' of the entire conversation. This is critical! Be creative!")
 
-        parser.add_argument("-en", "--encrypted", type=bool,default=False, help="Is the conversation history encrypted? If set to true, you will have to enter a passphrase when the server starts.")
+        parser.add_argument("-en", "--encrypted", type=LlamaUtils.str_to_bool, default=False, help="Is the conversation history (and an encrypted system prompt) encrypted? If set to true, you will have to enter a passphrase when the server starts.")
 
 
     @staticmethod
@@ -505,7 +613,8 @@ class LlamaUtils:
             argDict.update(LlamaUtils.get_system_args_dict(args, log_func))
             argDict.update(LlamaUtils.get_role_play_args_dict(args, log_func))
 
-            argDict['system_message'] = LlamaUtils.get_system_message(argDict['system_prompt_file'])
+            # An encrypted prompt comes back as None here; RolePlay decrypts it once it has asked for the passphrase.
+            argDict['system_message'] = LlamaUtils.get_system_message(argDict['system_prompt_file'], defer_encrypted=True)
 
         except SystemExit as e:
             argDict = {}
@@ -1587,18 +1696,34 @@ class LlamaUtils:
 
 
     @staticmethod
-    def get_system_message(prompt_file: str, log_func: Callable[[str], None] = print)->str:
+    def get_system_message(prompt_file: str, log_func: Callable[[str], None] = print, passphrase: str = "", defer_encrypted: bool = False) -> Optional[str]:
         """
         Accepts the file that contains the system prompt and attempts to extract it as a string.
 
-        :param prompt_file:
+        A plaintext prompt that cannot be read falls back to BASE_SYSTEM_MESSAGE, as it always has. An ENCRYPTED prompt
+        never does: a wrong passphrase quietly answering with a different persona is worse than not starting, so its
+        errors are raised. And an encrypted prompt with no passphrase yet can be deferred - the config is read before
+        the passphrase is asked for, so the caller loads it again once it has one.
+
+        :param prompt_file: The prompt file (or the name of one whose '.enc' twin exists - see find_prompt_file).
         :param log_func: The function that prints whatever we are targeting. This will usually be 'print' or some form of 'logger.info'. 'logger'error' etc.
-        :return:
+        :param passphrase: The conversation passphrase, for an encrypted prompt.
+        :param defer_encrypted: If True, an encrypted prompt with no passphrase returns None instead of raising.
+        :return: The system message, or None for a deferred encrypted prompt.
+        :raises ValueError, FileNotFoundError: For an encrypted prompt that cannot be decrypted (see decrypt_prompt).
         """
+        if LlamaUtils.is_encrypted_prompt(prompt_file):
+            if not passphrase and defer_encrypted:
+                log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_system_message: The system prompt is encrypted; it is decrypted once the passphrase is entered.{ColoredText.END_TEXT}")
+                return None
+            system_message = LlamaUtils.load_system_prompt(prompt_file, log_func, passphrase)
+            log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_system_message: Loaded and decrypted system message{ColoredText.END_TEXT}")
+            return system_message or LlamaUtils.BASE_SYSTEM_MESSAGE
+
         # System message load
         system_message = ""
         try:
-            system_message = LlamaUtils.load_system_prompt(prompt_file)
+            system_message = LlamaUtils.load_system_prompt(prompt_file, log_func)
             log_func(f"{ColoredText.BLUE_TEXT}LlamaUtils.get_system_message: Loaded system message{ColoredText.END_TEXT}")
         except Exception as e:
             log_func(f"{ColoredText.RED_TEXT}LlamaUtils.get_system_message: Could not load system message file; loading default prompt. Error: [{e}]{ColoredText.END_TEXT}")
